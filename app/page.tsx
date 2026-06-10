@@ -22,11 +22,13 @@ export default function Page() {
 
       <div className="breath" aria-hidden="true" />
 
-      <section aria-label="overheard">
+      <section aria-labelledby="overheard-label">
         <Reveal>
           <div className="overheard-label">
             <div className="rule" />
-            <span className="micro">overheard</span>
+            <span className="micro" id="overheard-label">
+              overheard
+            </span>
             <div className="rule" />
           </div>
           <Overheard />

@@ -9,9 +9,12 @@ export const contentType = "image/png";
 export default async function OpengraphImage() {
   const fontsDir = path.join(process.cwd(), "assets", "fonts");
   const [italic, roman] = await Promise.all([
-    readFile(path.join(fontsDir, "eb-garamond-latin-500-italic.woff")),
-    readFile(path.join(fontsDir, "eb-garamond-latin-400-normal.woff")),
+    readFile(path.join(fontsDir, "eb-garamond-500-italic.ttf")),
+    readFile(path.join(fontsDir, "eb-garamond-400-normal.ttf")),
   ]);
+
+  // equal fixed-width side slots keep the centered label on the 600px axis
+  const sideSlot = 150;
 
   return new ImageResponse(
     (
@@ -34,19 +37,14 @@ export default async function OpengraphImage() {
             padding: "52px 72px 0",
             fontSize: 19,
             letterSpacing: 6,
-            color: "#8B857A",
+            color: "#6B665C",
           }}
         >
-          <div
-            style={{
-              width: 13,
-              height: 13,
-              border: "1.5px solid #8B857A",
-              transform: "rotate(45deg)",
-            }}
-          />
+          <div style={{ display: "flex", width: sideSlot }}>◇</div>
           <div style={{ display: "flex" }}>[ A NOTICE TO RESIDENTS ]</div>
-          <div style={{ display: "flex" }}>N° 0001</div>
+          <div style={{ display: "flex", width: sideSlot, justifyContent: "flex-end" }}>
+            № 0001
+          </div>
         </div>
         <div
           style={{
@@ -83,7 +81,7 @@ export default async function OpengraphImage() {
             paddingBottom: 48,
             fontSize: 16,
             letterSpacing: 6,
-            color: "#8B857A",
+            color: "#6B665C",
           }}
         >
           NO ACTION IS REQUIRED

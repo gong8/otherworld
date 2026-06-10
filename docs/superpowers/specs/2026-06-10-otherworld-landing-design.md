@@ -57,11 +57,16 @@ furniture. No other copy anywhere on the page.
 
 ## Visual system
 
-- Paper: `#ECE9E1` (bone). Ink: `#1D1B17`. Muted ink (furniture/labels): `#8B857A`.
+- Paper: `#ECE9E1` (bone). Ink: `#1D1B17`. Muted ink (furniture/labels): `#6B665C`
+  (darkened from `#8B857A` for WCAG AA 4.5:1 at micro sizes). Tagline ink: `#4A463F`.
   Speech ink: `#33302A`. Hairlines: `rgba(29,27,23,0.16)`, 1px.
-- One typeface: **EB Garamond** (OFL), self-hosted. Roles: large italic masthead
-  (~clamp 40–64px), letterspaced micro-caps (9.5–11px, 0.30–0.46em tracking),
-  small-caps speaker names, italic speech (~19px, line-height ~2).
+- One typeface: **EB Garamond** (OFL), self-hosted — subsets cut from the upstream
+  variable font (weights 400/500 instanced) so `№`, `◇`, and oldstyle figures ship
+  in the real face; lining figures retained in caps furniture (`onum` off in
+  `.micro`). Roles: large italic masthead (~clamp 40–64px), letterspaced
+  micro-caps (9.5–11px, 0.30–0.46em tracking), small-caps speaker names, italic
+  speech (~19px, line-height ~2). Furniture rows are set on a `1fr auto 1fr` grid
+  so the centered label sits on the page's true axis.
 - No images, no icons beyond `◇`, no border-radius, no box-shadows on content,
   no color other than paper/ink.
 - Optional: a whisper of paper grain (SVG turbulence overlay ≤3% opacity). Cut it
@@ -82,8 +87,13 @@ Motion budget (the entire list):
 - Scroll reveals: opacity-only, no translate, 600–900ms ease.
 - The exchange cross-fades to the next every ~14s (~1.2s fade). Rotation is the
   single "living" element. Layout must not shift between exchanges of different
-  line counts (reserve height / stacked grid).
-- `prefers-reduced-motion: reduce` → fully still page, first exchange static.
+  line counts (reserve height / stacked grid). Hovering the exchange pauses
+  rotation (WCAG 2.2.2 mitigation — no visible control, per the no-chrome rule).
+- `prefers-reduced-motion: reduce` → fully still page, first exchange static;
+  honored live (mid-session changes stop/restart rotation).
+- Robustness rule: SSR HTML ships fully visible. Reveal hiding is applied only
+  once React is running, so a blocked or failed JS bundle can never strand
+  content invisible.
 
 ## Technical architecture
 
