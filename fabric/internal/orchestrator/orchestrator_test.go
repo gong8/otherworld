@@ -467,6 +467,140 @@ func TestRealClockConcurrencySmoke(t *testing.T) {
 	}
 }
 
+// blockingBrain blocks inside Think: it closes started on entry, waits for
+// release, then returns action. Relevant is always true. It lets a test hold
+// a think in flight — possible only because the orchestrator releases its
+// lock around the brain call — and observe the scope around it, synchronized
+// purely by channels.
+type blockingBrain struct {
+	started chan struct{} // closed when Think is entered
+	release chan struct{} // Think returns after this closes
+	action  brain.Action
+}
+
+func (b *blockingBrain) Relevant(context.Context, brain.VoiceView) (bool, error) { return true, nil }
+func (b *blockingBrain) Think(context.Context, brain.VoiceView) (brain.Action, error) {
+	close(b.started)
+	<-b.release
+	return b.action, nil
+}
+
+// notifyClock wraps RealClock so a test can wait — zero sleeps — for a timer
+// callback to fully return, think's reacquired phase included. One value
+// lands on fired per completed callback.
+type notifyClock struct {
+	orchestrator.RealClock
+	fired chan struct{}
+}
+
+func (c notifyClock) Schedule(d time.Duration, fn func()) func() {
+	return c.RealClock.Schedule(d, func() {
+		fn()
+		c.fired <- struct{}{}
+	})
+}
+
+// asyncHarness is a RealClock harness for the hoist tests: notifyClock, a
+// 1ms debounce, and a mutex-guarded log (Append runs on timer goroutines).
+func asyncHarness() (*orchestrator.Orchestrator, notifyClock, *sync.Mutex, *[]protocol.Envelope) {
+	clock := notifyClock{fired: make(chan struct{}, 4)}
+	mu := &sync.Mutex{}
+	log := &[]protocol.Envelope{}
+	o := orchestrator.New(orchestrator.Config{
+		Clock: clock, World: world.New(),
+		DebounceMin: time.Millisecond, DebounceMax: time.Millisecond,
+		Append: func(e protocol.Envelope) {
+			mu.Lock()
+			defer mu.Unlock()
+			*log = append(*log, e)
+		},
+	})
+	return o, clock, mu, log
+}
+
+// The async hoist: a slow brain must not freeze the scope. While voice slow
+// is blocked inside Think, the orchestrator lock must be free — another
+// principal's say must reach the record BEFORE the slow think completes.
+// Were the lock still held across Think, the second PrincipalSays would
+// deadlock here: release closes only after it returns.
+func TestSlowThinkDoesNotFreezeTheScope(t *testing.T) {
+	o, clock, mu, log := asyncHarness()
+	ctx := context.Background()
+
+	slow := &blockingBrain{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		action: brain.Action{Speak: true, Kind: protocol.KindSay,
+			To: []string{"voice:principal:slow"}, Body: "slow reply"},
+	}
+	o.AddVoice(ctx, charter("voice:slow", "slow", protocol.VoicePerson, nil, true), slow, nil)
+	o.AddVoice(ctx, charter("voice:quick", "quick", protocol.VoicePerson, nil, true), brain.NewFake(nil), nil)
+
+	o.PrincipalSays(ctx, "voice:slow", "ponder this")
+	<-slow.started // slow is mid-Think; the orchestrator lock must be free
+
+	o.PrincipalSays(ctx, "voice:quick", "hello quick")
+
+	mu.Lock()
+	if got := kinds(*log); got != "say>say" {
+		t.Fatalf("quick's say must land while slow is still thinking, got %s", got)
+	}
+	if (*log)[1].Body != "hello quick" {
+		t.Fatalf("second record entry must be quick's say, got %q", (*log)[1].Body)
+	}
+	mu.Unlock()
+
+	close(slow.release)
+	<-clock.fired // slow's timer callback — reacquire phase included — returned
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got := kinds(*log); got != "say>say>say" {
+		t.Fatalf("slow's reply must land after release, got %s", got)
+	}
+	if (*log)[2].Body != "slow reply" {
+		t.Fatalf("slow's reply must be last — quick's say landed first — got %q", (*log)[2].Body)
+	}
+}
+
+// A think superseded while in flight is discarded on reacquire: while the
+// old brain is blocked inside Think, AddVoice re-claims the slot (generation
+// bump, under a lock that is free precisely because of the hoist). The old
+// brain's action must never reach the record even though its Think returns
+// normally.
+func TestSupersededDuringInFlightThinkDiscards(t *testing.T) {
+	o, clock, mu, log := asyncHarness()
+	ctx := context.Background()
+
+	ch := charter("voice:res", "the household", protocol.VoiceThing, []string{"lamp.set"}, true)
+	stale := &blockingBrain{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		action: brain.Action{Speak: true, Kind: protocol.KindSay,
+			To: []string{"voice:principal:res"}, Body: "stale reply"},
+	}
+	o.AddVoice(ctx, ch, stale, map[string]any{"lamp": "off"})
+
+	o.PrincipalSays(ctx, "voice:res", "ping")
+	<-stale.started // the old brain is mid-Think, off the lock
+
+	o.AddVoice(ctx, ch, brain.NewFake(nil), nil) // re-claim: generation bumps
+
+	close(stale.release)
+	<-clock.fired // the old think's callback fully returned, discard included
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, e := range *log {
+		if e.Body == "stale reply" {
+			t.Fatalf("a superseded in-flight think reached the record: %+v", e)
+		}
+	}
+	if got := kinds(*log); got != "say" {
+		t.Fatalf("only the principal's say belongs in the record, got %s", got)
+	}
+}
+
 // errBrain errors on demand: Relevant fails when relevantErr is set
 // (otherwise reports relevant), Think returns thinkErr.
 type errBrain struct{ relevantErr, thinkErr error }

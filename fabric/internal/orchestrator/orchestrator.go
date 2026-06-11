@@ -11,13 +11,21 @@
 //
 // A single mutex guards all orchestrator state. Every entry point
 // (PrincipalSays, Inject, AddVoice, WorldView) takes the lock; Clock.Schedule
-// callbacks re-enter through the same lock. Brains are therefore called
-// under the lock — fine for fake brains; the composition root (Task 11) is
-// responsible for keeping slow brains off the hot path. Because all timer
-// activity in tests happens on the goroutine driving FakeClock.Advance, the
-// FakeClock needs no mutex of its own. With RealClock, a timer that has
-// already fired when its cancel races Stop is discarded by a per-voice
-// generation counter inside the callback.
+// callbacks re-enter through the same lock. The lock is never held across a
+// brain.Think call: think snapshots the VoiceView and the voice's generation
+// under the lock, releases it for the duration of Think, then reacquires and
+// re-validates (generation, exchange gate) before any effect lands — a slow
+// brain never freezes the scope. One think executes at a time per timer
+// goroutine; a think superseded while in flight (a newer trigger or a
+// re-AddVoice bumped the generation) is discarded silently on reacquire.
+// Relevant, by contrast, runs at schedule time under the lock by design — it
+// must stay cheap (the bedrock adapter honors this with heuristics). Because
+// all timer activity in tests happens on the goroutine driving
+// FakeClock.Advance, the FakeClock needs no mutex of its own, and releasing
+// the lock mid-callback admits no interleaving there (one goroutine drives
+// everything), so golden tests stay deterministic. With RealClock, a timer
+// that has already fired when its cancel races Stop is discarded by the same
+// per-voice generation counter inside the callback.
 package orchestrator
 
 import (
@@ -388,9 +396,9 @@ func (o *Orchestrator) route(ctx context.Context, env protocol.Envelope) {
 
 // scheduleThink gates on relevance now, then debounces the think. Only one
 // think may be pending per voice: a newer trigger replaces the older one.
-// Note that Relevant runs at schedule time, so an irrelevant trigger does
-// NOT displace a pending think — moving Relevant to fire time would change
-// that semantics.
+// Note that Relevant runs at schedule time — under the lock, so it must stay
+// cheap — and therefore an irrelevant trigger does NOT displace a pending
+// think; moving Relevant to fire time would change that semantics.
 func (o *Orchestrator) scheduleThink(ctx context.Context, ve *voiceEntry, trigger protocol.Envelope) {
 	rel, err := ve.brain.Relevant(ctx, o.view(ve, trigger))
 	if err != nil {
@@ -440,32 +448,62 @@ func (o *Orchestrator) view(ve *voiceEntry, trigger protocol.Envelope) brain.Voi
 	}
 }
 
-// think fires a debounced think: turn-cap check, brain call, speak gate,
-// mandate gate, then the surviving action becomes an envelope.
-func (o *Orchestrator) think(ctx context.Context, ve *voiceEntry, trigger protocol.Envelope) {
-	if ex := o.exchanges[trigger.Exchange]; trigger.Exchange != "" && ex != nil {
-		if ex.closed && ex.outcome == "abandoned" {
-			return // dead exchange: no further replies into it
-		}
-		if !ex.closed && ex.turns >= o.cfg.TurnCap {
-			// Turn cap: the reply that would exceed the cap becomes a
-			// visible withdraw; lifecycle closes the exchange as abandoned.
-			o.inject(ctx, protocol.Envelope{
-				From: ve.charter.Voice, Serves: ve.charter.Serves, Scope: o.cfg.Scope,
-				To:   others(ex.participants, ve.charter.Voice),
-				Kind: protocol.KindWithdraw, Exchange: ex.id, Body: "turn cap reached",
-			})
-			return
-		}
+// exchangeGate vets trigger's exchange and reports whether the think may
+// proceed. Lock held. think runs it twice — before releasing the lock for
+// the brain call and again after reacquiring, because the exchange may close
+// or reach the cap while the voice thinks. A reply into a closed-abandoned
+// exchange is swallowed silently; a reply that would exceed the turn cap
+// becomes a visible withdraw, emitted here under the lock as ever.
+func (o *Orchestrator) exchangeGate(ctx context.Context, ve *voiceEntry, trigger protocol.Envelope) bool {
+	ex := o.exchanges[trigger.Exchange]
+	if trigger.Exchange == "" || ex == nil {
+		return true
 	}
-	// HOIST BOUNDARY (future async work): everything above the Think call
-	// re-validates after a lock reacquire — the generation counter covers
-	// supersession and the exchange gate above re-runs cheaply. Only the
-	// Think call itself is a candidate to move off the lock.
-	a, err := ve.brain.Think(ctx, o.view(ve, trigger))
+	if ex.closed && ex.outcome == "abandoned" {
+		return false // dead exchange: no further replies into it
+	}
+	if !ex.closed && ex.turns >= o.cfg.TurnCap {
+		// Turn cap: the reply that would exceed the cap becomes a
+		// visible withdraw; lifecycle closes the exchange as abandoned.
+		o.inject(ctx, protocol.Envelope{
+			From: ve.charter.Voice, Serves: ve.charter.Serves, Scope: o.cfg.Scope,
+			To:   others(ex.participants, ve.charter.Voice),
+			Kind: protocol.KindWithdraw, Exchange: ex.id, Body: "turn cap reached",
+		})
+		return false
+	}
+	return true
+}
+
+// think fires a debounced think: exchange gate, brain call, speak gate,
+// mandate gate, then the surviving action becomes an envelope. The mutex is
+// held on entry and on return (the timer callback owns lock/unlock), but
+// never across the brain call:
+//
+//	phase 1 (locked):   exchange gate; snapshot VoiceView and generation.
+//	phase 2 (unlocked): ve.brain.Think — the only code that runs off the lock.
+//	phase 3 (relocked): discard if superseded (gen mismatch covers newer
+//	  triggers and re-AddVoice); think.error OnDrop, under the lock per its
+//	  contract; exchange gate re-run (the exchange may have closed or capped
+//	  while we thought); speak, settle.spoken, mandate and terms gates; inject.
+func (o *Orchestrator) think(ctx context.Context, ve *voiceEntry, trigger protocol.Envelope) {
+	if !o.exchangeGate(ctx, ve, trigger) {
+		return
+	}
+	view := o.view(ve, trigger) // value snapshot, safe off the lock
+	gen := ve.gen
+	o.mu.Unlock()
+	a, err := ve.brain.Think(ctx, view)
+	o.mu.Lock()
+	if ve.gen != gen {
+		return // superseded while thinking: the result is stale, discard silently
+	}
 	if err != nil {
 		o.drop("think.error", ve.charter.Voice, trigger)
 		return // errors are silence
+	}
+	if !o.exchangeGate(ctx, ve, trigger) {
+		return // the exchange closed or capped while we thought
 	}
 	if !a.Speak {
 		return // the zero value is silence
