@@ -12,7 +12,7 @@ the feed carries it — what is not recorded is not broadcast.
 - **scope** — the room a set of voices share; broadcasts stay inside it; `household` and `street` are the two v1 scopes
 - **hail / exchange** — a bare `hail` or `propose` crystallises an exchange; turns accumulate until a `settle`, a `withdraw`, or the turn cap ends it
 - **settlement** — a `settle` envelope whose typed terms the world reducer has already applied; state changes only via settlements (law 6)
-- **mandate** — per-voice hard caps: `may_propose_terms[]`, `may_settle_without_principal`, `spend_limit_marks`; enforced in the orchestrator before anything reaches the record
+- **mandate** — per-voice hard caps: `may_propose_terms[]` is enforced at the orchestrator gate before anything reaches the record; trades require an explicit consent round-trip (`ask_principal`); `may_settle_without_principal` and `spend_limit_marks` are carried in every charter and become orchestrator-enforced when real brains land in plan 3
 
 ## quickstart
 
@@ -93,7 +93,7 @@ curl 'http://localhost:8080/v0/state?scope=scope:household'
 | law | mechanism |
 |-----|-----------|
 | 2 attribution | `serves` is a mandatory envelope field, rendered under every voice |
-| 4 mandate | charter caps enforced in the orchestrator before Append; `ask_principal` round-trips consent for trades |
+| 4 mandate | `may_propose_terms` enforced at the orchestrator gate before Append; `ask_principal` round-trips consent for trades; `may_settle_without_principal` and `spend_limit_marks` carried in every charter, orchestrator-enforced when real brains land in plan 3 |
 | 5 overhearable | the schema has no private agent-to-agent path; the feed carries everything |
 | 6 settle in terms | world.Apply accepts typed terms only, never prose; settles are synthesised by the orchestrator, never spoken |
 | 7 forgetting | presence events carry a 24h TTL and are purged at the store layer every minute |
@@ -105,5 +105,5 @@ curl 'http://localhost:8080/v0/state?scope=scope:household'
 - **bedrock brains** — `brain.Brain` is the seam; the `fake` adapter ships; the Bedrock (Claude) adapter arrives in Plan 3
 - **web client** — `/world` live feed and private line UI; Plan 2
 - **deploy** — Fargate + ALB + RDS via CDK; Plan 4; `make dev` covers local
-- **runtime package** — `fabric/internal/runtime` is wired but unused: it hosts async voice loops for slow LLM brains; not needed while fake brains run under the orchestrator lock
+- **runtime package** — `fabric/internal/runtime` is built and tested but deliberately NOT wired: it hosts async voice loops for slow LLM brains; not needed while fake brains run under the orchestrator lock
 - **federation, real money, real devices** — v2 doors, all left open in the protocol

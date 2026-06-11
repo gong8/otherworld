@@ -257,8 +257,12 @@ func ResidentCharter(voice, serves string) protocol.Charter {
 		Kind:      protocol.VoicePerson,
 		Interests: "represent " + serves + " faithfully. ask before anything irreversible. prefer quiet settlements.",
 		Mandate: protocol.Mandate{
-			MayProposeTerms:           []string{"temperature.set", "lamp.set", "curtains.set", "trade"},
-			MaySettleWithoutPrincipal: false,
+			MayProposeTerms: []string{"temperature.set", "lamp.set", "curtains.set", "trade"},
+			// true: residents DO settle comfort compromises without asking
+			// (rule 6 accepts the heating's counter directly); the real
+			// consent semantics are the interests line ("ask before anything
+			// irreversible") plus the trade rule's ask_principal.
+			MaySettleWithoutPrincipal: true,
 			SpendLimitMarks:           10,
 		},
 	}
