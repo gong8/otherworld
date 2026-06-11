@@ -2,7 +2,7 @@ import { ImageResponse } from "next/og";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
-export const alt = "the otherworld — the world beside the world. it is already speaking.";
+export const alt = "the otherworld — the world beside the world.";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -71,20 +71,7 @@ export default async function OpengraphImage() {
             }}
           >
             <div style={{ display: "flex", paddingLeft: 10 }}>THE WORLD BESIDE THE WORLD.</div>
-            <div style={{ display: "flex", paddingLeft: 10 }}>IT IS ALREADY SPEAKING.</div>
           </div>
-        </div>
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "center",
-            paddingBottom: 48,
-            fontSize: 16,
-            letterSpacing: 6,
-            color: "#6B665C",
-          }}
-        >
-          NO ACTION IS REQUIRED
         </div>
       </div>
     ),

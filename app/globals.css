@@ -137,12 +137,12 @@ main {
 /* ---- breaths of empty paper ---- */
 
 .breath {
-  height: 34svh;
+  height: 18svh;
 }
 
-/* ---- movement ii — overheard ---- */
+/* ---- ruled section labels ---- */
 
-.overheard-label {
+.ruled-label {
   display: flex;
   align-items: center;
   gap: 22px;
@@ -150,18 +150,65 @@ main {
   margin: 0 auto;
 }
 
-.overheard-label .rule {
+.ruled-label .rule {
   flex: 1;
   height: 1px;
   background: var(--hairline);
 }
 
-.overheard-label span {
+.ruled-label span {
   font-size: 0.59375rem;
   letter-spacing: 0.42em;
   /* cancel the trailing letterspace so both gaps to the rules are equal */
   margin-right: -0.42em;
 }
+
+/* ---- movement ii — the manifesto ---- */
+
+.m2 .ruled-label {
+  margin-top: 4.5rem;
+}
+
+.thesis {
+  margin: 0 auto;
+  width: min(34rem, calc(100% - 3rem));
+  font-size: 1.1875rem;
+  line-height: 1.9;
+  color: var(--ink-speech);
+  text-align: justify;
+  hyphens: auto;
+}
+
+.terms {
+  margin: 3.5rem auto 0;
+  width: min(34rem, calc(100% - 3rem));
+  padding: 0;
+  list-style: none;
+  counter-reset: term;
+  font-size: 1.1875rem;
+  line-height: 1.75;
+  color: var(--ink-speech);
+}
+
+.terms li {
+  counter-increment: term;
+  position: relative;
+  /* hanging indent matches the .line speaker outdent */
+  padding-left: 2.2em;
+}
+
+.terms li + li {
+  margin-top: 0.85rem;
+}
+
+.terms li::before {
+  content: counter(term) ".";
+  position: absolute;
+  left: 0;
+  color: var(--ink-mute);
+}
+
+/* ---- movement iii — overheard ---- */
 
 .exchange-stack {
   display: grid;
@@ -209,7 +256,13 @@ main {
   color: var(--ink);
 }
 
-/* ---- movement iii — closing & folio ---- */
+/* the record line — upright furniture inside italic speech */
+.settled {
+  margin: 1.6rem 0 0;
+  font-style: normal;
+}
+
+/* ---- folio ---- */
 
 .m3 {
   min-height: 76svh;
@@ -217,18 +270,14 @@ main {
   flex-direction: column;
 }
 
+/* a column, not a centering row: inner blocks need the full page
+   width as their reference for min()/% widths to resolve */
 .m3-center {
   flex: 1;
   display: flex;
-  align-items: center;
+  flex-direction: column;
   justify-content: center;
-  padding: 48px 24px;
-}
-
-.closing {
-  margin: 0;
-  font-size: clamp(1.4rem, 3.2vw, 1.6875rem);
-  font-style: italic;
+  padding: 48px 0;
 }
 
 .folio {

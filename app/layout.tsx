@@ -15,7 +15,7 @@ const garamond = localFont({
 
 export const metadata: Metadata = {
   title: "the otherworld",
-  description: "the world beside the world. it is already speaking.",
+  description: "the world beside the world.",
 };
 
 export const viewport: Viewport = {

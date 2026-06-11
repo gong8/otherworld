@@ -50,17 +50,21 @@ export function Overheard() {
       >
         {exchanges.map((exchange, i) => (
           <div key={i} className={i === active ? "exchange is-active" : "exchange"}>
-            {exchange.map((line, j) => (
+            {exchange.lines.map((line, j) => (
               <p key={j} className="line">
                 <span className="who">{line.who}</span> — {line.said}
               </p>
             ))}
+            <p className="settled micro">[ settled · {exchange.settled} ]</p>
           </div>
         ))}
       </div>
       <div className="sr-only">
         {exchanges.map((exchange, i) => (
-          <p key={i}>{exchange.map((line) => `${line.who} — ${line.said}`).join(" ")}</p>
+          <p key={i}>
+            {exchange.lines.map((line) => `${line.who} — ${line.said}`).join(" ")} settled:{" "}
+            {exchange.settled}.
+          </p>
         ))}
       </div>
     </>
