@@ -27,6 +27,10 @@ type config struct {
 	origins                  []string
 	debounceMin, debounceMax time.Duration
 	ambientMin, ambientMax   time.Duration
+	// fresh: when true, WipeRecord is called immediately after store.Open and
+	// before seeding or serving. Dev sandbox only; the durable record is a
+	// production property.
+	fresh bool
 }
 
 func defaultConfig(databaseURL string) config {
@@ -64,6 +68,7 @@ func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	brains := flag.String("brains", "fake", "brain adapter: fake|bedrock")
 	origins := flag.String("origins", "", "comma-separated browser origin allowlist for websocket upgrades (empty: dev mode, any origin)")
+	fresh := flag.Bool("fresh", false, "wipe the record on boot (dev sandbox only; never use in production)")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
@@ -82,6 +87,7 @@ func main() {
 		os.Exit(1)
 	}
 	cfg := defaultConfig(databaseURL)
+	cfg.fresh = *fresh
 	for _, o := range strings.Split(*origins, ",") {
 		if o = strings.TrimSpace(o); o != "" {
 			cfg.origins = append(cfg.origins, o)

@@ -44,6 +44,7 @@ func TestE2EDemoScript(t *testing.T) {
 	t.Setenv("OW_AMBIENT_MAX_MS", "600000")
 
 	cfg := defaultConfig(dbURL)
+	cfg.fresh = true // isolate this test run; the record is wiped on boot
 	cfg.applyEnv()
 
 	ctx, cancel := context.WithCancel(context.Background())

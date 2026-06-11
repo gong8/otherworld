@@ -5,6 +5,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -161,4 +162,29 @@ func (s *Store) InsertPresence(ctx context.Context, id, scope, voice, event stri
 // PurgeExpiredPresence deletes presence events with expires_at < now, returning the count deleted.
 func (s *Store) PurgeExpiredPresence(ctx context.Context, now time.Time) (int64, error) {
 	return s.q.PurgeExpiredPresence(ctx, toTz(now))
+}
+
+// WipeRecord deletes all rows from the four record tables in FK-safe order:
+// settlements first (references exchanges), then exchanges, utterances, and
+// presence_events. Runs in a single transaction.
+//
+// Dev sandbox only. The durable record is a production property; this method
+// must never be called outside of fresh-mode startup.
+func (s *Store) WipeRecord(ctx context.Context) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	for _, stmt := range []string{
+		"DELETE FROM settlements",
+		"DELETE FROM exchanges",
+		"DELETE FROM utterances",
+		"DELETE FROM presence_events",
+	} {
+		if _, err := tx.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("wipe: %s: %w", stmt, err)
+		}
+	}
+	return tx.Commit(ctx)
 }

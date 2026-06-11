@@ -9,7 +9,8 @@ docker compose up -d --wait postgres
 export DATABASE_URL="${DATABASE_URL:-postgres://otherworld:otherworld@localhost:55432/fabric?sslmode=disable}"
 
 (cd fabric && go build -o fabricd ./cmd/fabricd)
-./fabric/fabricd -brains fake -addr :8080 &
+# dev is a sandbox; every pnpm dev is a new world
+./fabric/fabricd -brains fake -addr :8080 -fresh &
 FABRIC_PID=$!
 trap 'kill "$FABRIC_PID" 2>/dev/null || true' EXIT INT TERM
 

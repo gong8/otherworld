@@ -3,7 +3,7 @@ DB_URL=postgres://otherworld:otherworld@localhost:55432/fabric?sslmode=disable
 .PHONY: dev test test-db golden up sqlc
 
 dev: ## run the world locally with fake brains
-	cd fabric && DATABASE_URL=$(DB_URL) go run ./cmd/fabricd -brains fake -addr :8080
+	cd fabric && DATABASE_URL=$(DB_URL) go run ./cmd/fabricd -brains fake -addr :8080 -fresh
 
 test: ## unit tests (no db)
 	cd fabric && go test ./... -short

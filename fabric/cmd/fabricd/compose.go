@@ -112,6 +112,13 @@ func newServer(ctx context.Context, cfg config) (*server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
+	if cfg.fresh {
+		if err := st.WipeRecord(ctx); err != nil {
+			st.Close()
+			return nil, fmt.Errorf("fresh wipe: %w", err)
+		}
+		slog.Info("fresh world: record wiped (dev)")
+	}
 	var nonce [6]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		st.Close()
