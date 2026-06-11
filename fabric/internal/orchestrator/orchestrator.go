@@ -362,6 +362,32 @@ func (o *Orchestrator) lifecycle(env *protocol.Envelope) *exchange {
 // settle's From. With more than one thing participant, the first in
 // participant order wins.
 func (o *Orchestrator) settleExchange(ctx context.Context, ex *exchange, accept protocol.Envelope) {
+	// PARTY BINDING [B4 review]: a trade settles only between the parties
+	// present — the pending proposer and the accepter. Terms naming an absent
+	// buyer or seller would move a third party's marks on the strength of a
+	// conversation that party never joined; that is a decline, mirroring the
+	// Apply-failure path below. Sitting here, below the think gates AND the
+	// Inject funnel, it binds consented accepts too. Fail-open on unmarshal
+	// for the same reason as the spend gate: an unreadable trade payload
+	// fails World.Apply's identical unmarshal and declines there.
+	if ex.pending.Terms.Type == "trade" {
+		var v struct {
+			Buyer  string `json:"buyer"`
+			Seller string `json:"seller"`
+		}
+		if err := json.Unmarshal(ex.pending.Terms.Value, &v); err == nil {
+			parties := []string{ex.pending.From, accept.From}
+			if !slices.Contains(parties, v.Buyer) || !slices.Contains(parties, v.Seller) {
+				ex.closed, ex.outcome = true, "abandoned"
+				o.inject(ctx, protocol.Envelope{
+					From: accept.From, Serves: accept.Serves, Scope: o.cfg.Scope,
+					To: []string{ex.pending.From}, Kind: protocol.KindDecline,
+					Exchange: ex.id, Body: "the parties named are not the parties present.",
+				})
+				return
+			}
+		}
+	}
 	owner := accept.From
 	for _, p := range ex.participants {
 		if ve := o.voices[p]; ve != nil && ve.charter.Kind == protocol.VoiceThing {
@@ -556,6 +582,23 @@ func (o *Orchestrator) think(ctx context.Context, ve *voiceEntry, trigger protoc
 			o.drop("mandate", ve.charter.Voice, env)
 			return
 		}
+		// PROPOSE-SIDE SPEND GATE [B4 review]: a trade propose naming the
+		// PROPOSER ITSELF as buyer above its own SpendLimitMarks drops as
+		// mandate.spend — without this, a voice barred from accepting a
+		// 50-mark trade could propose it and let the counterparty accept
+		// (the accept-side gate binds only the accepter). Same fail-open
+		// rule as the accept side: see the why-safe comment there.
+		if a.Terms.Type == "trade" {
+			var v struct {
+				PriceMarks int    `json:"price_marks"`
+				Buyer      string `json:"buyer"`
+			}
+			if err := json.Unmarshal(a.Terms.Value, &v); err == nil &&
+				v.Buyer == ve.charter.Voice && v.PriceMarks > ve.charter.Mandate.SpendLimitMarks {
+				o.drop("mandate.spend", ve.charter.Voice, env)
+				return
+			}
+		}
 		// SCHEMA GATE (law 6, defense-in-depth): validate the payload against
 		// the proto/terms registry. Order: mandate first (cheaper), schema
 		// second. nil registry disables validation (unit-test convenience).
@@ -591,6 +634,13 @@ func (o *Orchestrator) think(ctx context.Context, ve *voiceEntry, trigger protoc
 			// BUYER spends: a seller accepting an offer receives marks, so its
 			// SpendLimitMarks does not bind. Inject-path (consented) accepts
 			// are not spend-gated either — consent is the higher authority.
+			//
+			// FAIL-OPEN on unmarshal (the err == nil guard) is safe by
+			// construction: a trade payload this gate cannot read is one
+			// World.Apply cannot read either — same JSON, same struct shape —
+			// so the settle fails there and becomes a visible decline.
+			// Nothing unreadable can move marks; the gate only needs to bind
+			// payloads that could actually settle.
 			var v struct {
 				PriceMarks int    `json:"price_marks"`
 				Buyer      string `json:"buyer"`

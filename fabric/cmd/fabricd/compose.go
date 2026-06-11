@@ -361,6 +361,13 @@ func (s *server) index(env protocol.Envelope) {
 			s.mu.Unlock()
 		}
 	case protocol.KindSettle, protocol.KindWithdraw:
+		// The shadow ledger applies trade settles WITHOUT re-checking party
+		// binding, deliberately: settles exist only via the orchestrator's
+		// settleExchange (Inject drops external settles, the think gate drops
+		// spoken ones), and settleExchange declines any trade whose
+		// {buyer, seller} is not a subset of {proposer, accepter} — so no
+		// unbound settle can reach this stream. Duplicating the check here
+		// would invite drift between the two ledgers.
 		if env.Kind == protocol.KindSettle && env.Terms != nil && env.Terms.Type == "trade" {
 			var v struct {
 				PriceMarks int    `json:"price_marks"`
