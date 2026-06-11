@@ -2,6 +2,7 @@ package orchestrator_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -449,5 +450,92 @@ func TestRealClockConcurrencySmoke(t *testing.T) {
 		}
 		seen[e.ID] = true
 		prev = e.ID
+	}
+}
+
+// errBrain errors on demand: Relevant fails when relevantErr is set
+// (otherwise reports relevant), Think returns thinkErr.
+type errBrain struct{ relevantErr, thinkErr error }
+
+func (b errBrain) Relevant(context.Context, brain.VoiceView) (bool, error) {
+	return b.relevantErr == nil, b.relevantErr
+}
+func (b errBrain) Think(context.Context, brain.VoiceView) (brain.Action, error) {
+	return brain.Action{}, b.thinkErr
+}
+
+// OnDrop fires at every deterministic drop site with the right reason and
+// the acting/failing voice.
+func TestOnDropPinsAllFiveReasons(t *testing.T) {
+	type droprec struct {
+		reason, voice string
+		kind          protocol.Kind
+	}
+	clock := orchestrator.NewFakeClock(time.Date(2026, 6, 11, 3, 0, 0, 0, time.UTC))
+	var drops []droprec
+	o := orchestrator.New(orchestrator.Config{
+		Clock: clock, World: world.New(),
+		DebounceMin: 2 * time.Second, DebounceMax: 2 * time.Second,
+		Append: func(protocol.Envelope) {},
+		OnDrop: func(reason, voice string, env protocol.Envelope) {
+			drops = append(drops, droprec{reason, voice, env.Kind})
+		},
+	})
+	ctx := context.Background()
+
+	o.AddVoice(ctx, charter("voice:err-rel", "a", protocol.VoicePerson, nil, true),
+		errBrain{relevantErr: errors.New("relevance broke")}, nil)
+	o.AddVoice(ctx, charter("voice:err-think", "b", protocol.VoicePerson, nil, true),
+		errBrain{thinkErr: errors.New("think broke")}, nil)
+	o.AddVoice(ctx, charter("voice:liar", "c", protocol.VoiceThing, []string{"temperature.set"}, true),
+		brain.NewFake([]brain.Rule{{
+			Match: func(v brain.VoiceView) bool { return true },
+			Respond: func(v brain.VoiceView) brain.Action {
+				return brain.Action{Speak: true, Kind: protocol.KindSettle,
+					Terms: &protocol.Terms{Type: "temperature.set", Value: []byte(`30`)}}
+			},
+		}}), map[string]any{"temperature": 21.0})
+	o.AddVoice(ctx, charter("voice:rogue", "d", protocol.VoiceThing, []string{"lamp.set"}, true),
+		brain.NewFake([]brain.Rule{{
+			Match: func(v brain.VoiceView) bool { return true },
+			Respond: func(v brain.VoiceView) brain.Action {
+				return brain.Action{Speak: true, Kind: protocol.KindPropose,
+					Terms: &protocol.Terms{Type: "trade", Value: []byte(`{}`)}}
+			},
+		}}), map[string]any{"lamp": "off"})
+
+	// relevant.error — fires synchronously at schedule time.
+	o.PrincipalSays(ctx, "voice:err-rel", "hello")
+	clock.Advance(10 * time.Second)
+	// think.error — fires when the debounced think runs.
+	o.PrincipalSays(ctx, "voice:err-think", "hello")
+	clock.Advance(10 * time.Second)
+	// settle.spoken — in-mandate terms, dropped anyway.
+	o.PrincipalSays(ctx, "voice:liar", "hello")
+	clock.Advance(10 * time.Second)
+	// mandate — propose outside the charter.
+	o.PrincipalSays(ctx, "voice:rogue", "hello")
+	clock.Advance(10 * time.Second)
+	// settle.external — voice is env.From.
+	o.Inject(ctx, protocol.Envelope{
+		From: "voice:outsider", Serves: "x", Scope: o.ScopeID(),
+		Kind:  protocol.KindSettle,
+		Terms: &protocol.Terms{Type: "temperature.set", Value: []byte(`1`)},
+	})
+
+	want := []droprec{
+		{"relevant.error", "voice:err-rel", protocol.KindSay},
+		{"think.error", "voice:err-think", protocol.KindSay},
+		{"settle.spoken", "voice:liar", protocol.KindSettle},
+		{"mandate", "voice:rogue", protocol.KindPropose},
+		{"settle.external", "voice:outsider", protocol.KindSettle},
+	}
+	if len(drops) != len(want) {
+		t.Fatalf("expected %d drops, got %d: %+v", len(want), len(drops), drops)
+	}
+	for i, w := range want {
+		if drops[i] != w {
+			t.Fatalf("drop %d: got %+v, want %+v", i, drops[i], w)
+		}
 	}
 }

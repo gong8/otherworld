@@ -54,10 +54,12 @@ type Config struct {
 	Append func(protocol.Envelope)
 	// OnDrop, when set, observes envelopes the orchestrator silently
 	// discards. Reasons: "settle.external", "relevant.error", "think.error",
-	// "settle.spoken", "mandate". Called with the orchestrator mutex held:
-	// it must not call back into the Orchestrator and must not block.
+	// "settle.spoken", "mandate". voice is the acting/failing voice: the
+	// thinking voice at the relevant.error/think.error/mandate/settle.spoken
+	// sites, env.From at settle.external. Called with the orchestrator mutex
+	// held: it must not call back into the Orchestrator and must not block.
 	// Zero cost when nil.
-	OnDrop func(reason string, env protocol.Envelope)
+	OnDrop func(reason, voice string, env protocol.Envelope)
 	// Scope identifies this orchestrator's scope. Defaults to "scope:test".
 	Scope string
 }
@@ -181,16 +183,16 @@ func (o *Orchestrator) Inject(ctx context.Context, env protocol.Envelope) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if env.Kind == protocol.KindSettle {
-		o.drop("settle.external", env)
+		o.drop("settle.external", env.From, env)
 		return
 	}
 	o.inject(ctx, env)
 }
 
 // drop reports a silently discarded envelope to OnDrop, if set. Lock held.
-func (o *Orchestrator) drop(reason string, env protocol.Envelope) {
+func (o *Orchestrator) drop(reason, voice string, env protocol.Envelope) {
 	if o.cfg.OnDrop != nil {
-		o.cfg.OnDrop(reason, env)
+		o.cfg.OnDrop(reason, voice, env)
 	}
 }
 
@@ -351,7 +353,7 @@ func (o *Orchestrator) route(ctx context.Context, env protocol.Envelope) {
 func (o *Orchestrator) scheduleThink(ctx context.Context, ve *voiceEntry, trigger protocol.Envelope) {
 	rel, err := ve.brain.Relevant(ctx, o.view(ve, trigger))
 	if err != nil {
-		o.drop("relevant.error", trigger)
+		o.drop("relevant.error", ve.charter.Voice, trigger)
 		return // a brain error reads as "not relevant"
 	}
 	if !rel {
@@ -421,7 +423,7 @@ func (o *Orchestrator) think(ctx context.Context, ve *voiceEntry, trigger protoc
 	// Think call itself is a candidate to move off the lock.
 	a, err := ve.brain.Think(ctx, o.view(ve, trigger))
 	if err != nil {
-		o.drop("think.error", trigger)
+		o.drop("think.error", ve.charter.Voice, trigger)
 		return // errors are silence
 	}
 	if !a.Speak {
@@ -438,12 +440,12 @@ func (o *Orchestrator) think(ctx context.Context, ve *voiceEntry, trigger protoc
 	// the lifecycle exclusively; a spoken settle would let a voice lie about
 	// state (law 6).
 	if a.Kind == protocol.KindSettle {
-		o.drop("settle.spoken", env)
+		o.drop("settle.spoken", ve.charter.Voice, env)
 		return
 	}
 	if a.Kind == protocol.KindPropose {
 		if a.Terms == nil || !slices.Contains(ve.charter.Mandate.MayProposeTerms, a.Terms.Type) {
-			o.drop("mandate", env)
+			o.drop("mandate", ve.charter.Voice, env)
 			return
 		}
 	}
