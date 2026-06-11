@@ -502,6 +502,8 @@ func (c notifyClock) Schedule(d time.Duration, fn func()) func() {
 
 // asyncHarness is a RealClock harness for the hoist tests: notifyClock, a
 // 1ms debounce, and a mutex-guarded log (Append runs on timer goroutines).
+// Non-blocking voices must use NewFake(nil) — never relevant — or they
+// pollute the fired channel.
 func asyncHarness() (*orchestrator.Orchestrator, notifyClock, *sync.Mutex, *[]protocol.Envelope) {
 	clock := notifyClock{fired: make(chan struct{}, 4)}
 	mu := &sync.Mutex{}
@@ -598,6 +600,121 @@ func TestSupersededDuringInFlightThinkDiscards(t *testing.T) {
 	}
 	if got := kinds(*log); got != "say" {
 		t.Fatalf("only the principal's say belongs in the record, got %s", got)
+	}
+}
+
+// panicBrain panics inside Think, violating the brain.Brain no-panic
+// contract on purpose.
+type panicBrain struct{}
+
+func (panicBrain) Relevant(context.Context, brain.VoiceView) (bool, error) { return true, nil }
+func (panicBrain) Think(context.Context, brain.VoiceView) (brain.Action, error) {
+	panic("brain exploded")
+}
+
+// ctxWaitBrain blocks inside Think until the think context is done, then
+// returns its error — the shape of a hung network call honoring cancellation.
+type ctxWaitBrain struct {
+	started chan struct{} // closed on Think entry; nil to skip
+}
+
+func (b *ctxWaitBrain) Relevant(context.Context, brain.VoiceView) (bool, error) { return true, nil }
+func (b *ctxWaitBrain) Think(ctx context.Context, _ brain.VoiceView) (brain.Action, error) {
+	if b.started != nil {
+		close(b.started)
+	}
+	<-ctx.Done()
+	return brain.Action{}, ctx.Err()
+}
+
+// dropHarness is asyncHarness plus an OnDrop recorder, for the brain-failure
+// tests (panic, timeout, shutdown). Reads of drops must hold mu. The same
+// asyncHarness rule applies: non-blocking voices must use NewFake(nil).
+func dropHarness(mutate func(*orchestrator.Config)) (*orchestrator.Orchestrator, notifyClock, *sync.Mutex, *[]string) {
+	clock := notifyClock{fired: make(chan struct{}, 4)}
+	mu := &sync.Mutex{}
+	drops := &[]string{}
+	cfg := orchestrator.Config{
+		Clock: clock, World: world.New(),
+		DebounceMin: time.Millisecond, DebounceMax: time.Millisecond,
+		Append: func(protocol.Envelope) {},
+		OnDrop: func(reason, voice string, env protocol.Envelope) {
+			mu.Lock()
+			defer mu.Unlock()
+			*drops = append(*drops, reason+" "+voice)
+		},
+	}
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	return orchestrator.New(cfg), clock, mu, drops
+}
+
+// A panicking Think must not crash the timer goroutine (or the process): the
+// phase-2 recover turns it into a brain error, dropped as think.error with
+// lock balance preserved — the scope keeps serving afterwards.
+func TestThinkPanicDropsAsThinkError(t *testing.T) {
+	o, clock, mu, drops := dropHarness(nil)
+	ctx := context.Background()
+	o.AddVoice(ctx, charter("voice:boom", "boom", protocol.VoicePerson, nil, true), panicBrain{}, nil)
+
+	o.PrincipalSays(ctx, "voice:boom", "ping")
+	<-clock.fired // the timer callback fully returned: the panic did not escape
+
+	mu.Lock()
+	if got := strings.Join(*drops, ","); got != "think.error voice:boom" {
+		mu.Unlock()
+		t.Fatalf("a brain panic must drop as think.error, got %q", got)
+	}
+	mu.Unlock()
+
+	// The lock is balanced: the orchestrator still serves the scope.
+	o.PrincipalSays(ctx, "voice:boom", "again")
+	<-clock.fired
+}
+
+// ThinkTimeout: a brain that blocks until its context is done returns
+// ctx.Err(), which drops as think.error — a hung network call cannot wedge a
+// voice forever.
+func TestThinkTimeoutDropsAsThinkError(t *testing.T) {
+	o, clock, mu, drops := dropHarness(func(c *orchestrator.Config) {
+		c.ThinkTimeout = 10 * time.Millisecond
+	})
+	ctx := context.Background()
+	o.AddVoice(ctx, charter("voice:stuck", "stuck", protocol.VoicePerson, nil, true), &ctxWaitBrain{}, nil)
+
+	o.PrincipalSays(ctx, "voice:stuck", "ping")
+	<-clock.fired
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got := strings.Join(*drops, ","); got != "think.error voice:stuck" {
+		t.Fatalf("a timed-out think must drop as think.error, got %q", got)
+	}
+}
+
+// Canceling BaseContext reaches an in-flight think — fabricd's shutdown can
+// cancel a Bedrock call mid-flight; the result drops as think.error.
+func TestBaseContextCancelReachesInFlightThink(t *testing.T) {
+	base, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	o, clock, mu, drops := dropHarness(func(c *orchestrator.Config) {
+		c.BaseContext = base
+	})
+	ctx := context.Background()
+	started := make(chan struct{})
+	o.AddVoice(ctx, charter("voice:stuck", "stuck", protocol.VoicePerson, nil, true),
+		&ctxWaitBrain{started: started}, nil)
+
+	o.PrincipalSays(ctx, "voice:stuck", "ping")
+	<-started // the think is in flight, off the lock
+	cancel()  // shutdown
+	<-clock.fired
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got := strings.Join(*drops, ","); got != "think.error voice:stuck" {
+		t.Fatalf("a shutdown-canceled think must drop as think.error, got %q", got)
 	}
 }
 

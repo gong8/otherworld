@@ -25,7 +25,9 @@ func (w *World) Register(voice string, init ThingState) { w.things[voice] = init
 func (w *World) Credit(voice string, n int)             { w.marks[voice] += n }
 func (w *World) Marks(voice string) int                 { return w.marks[voice] }
 
-// View returns a copy; state changes only via Apply (law 6).
+// View returns a copy; state changes only via Apply (law 6). Values must
+// remain scalars; a nested map/slice would make the shallow copy racy under
+// off-lock brain reads.
 func (w *World) View(voice string) ThingState {
 	src := w.things[voice]
 	if src == nil {

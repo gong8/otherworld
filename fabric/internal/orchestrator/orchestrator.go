@@ -80,6 +80,14 @@ type Config struct {
 	// Utterance ids are left as-is ("utt_%026d") — the composition root
 	// already rewrites those with its own run+scope prefix.
 	RunID string
+	// BaseContext is the parent of every think context. Defaults to
+	// context.Background(). fabricd sets its shutdown context here so
+	// canceling it cancels in-flight brain calls (e.g. Bedrock requests).
+	BaseContext context.Context
+	// ThinkTimeout bounds a single brain.Think call: each think context
+	// carries this deadline. A brain that honors ctx.Done and returns ctx.Err
+	// reads as a brain error and drops as think.error. Defaults to 30s.
+	ThinkTimeout time.Duration
 }
 
 type Orchestrator struct {
@@ -129,6 +137,12 @@ func New(cfg Config) *Orchestrator {
 	}
 	if cfg.DebounceMax < cfg.DebounceMin {
 		cfg.DebounceMax = cfg.DebounceMin
+	}
+	if cfg.BaseContext == nil {
+		cfg.BaseContext = context.Background()
+	}
+	if cfg.ThinkTimeout <= 0 {
+		cfg.ThinkTimeout = 30 * time.Second
 	}
 	return &Orchestrator{
 		cfg:       cfg,
@@ -408,11 +422,6 @@ func (o *Orchestrator) scheduleThink(ctx context.Context, ve *voiceEntry, trigge
 	if !rel {
 		return
 	}
-	// Detach the context: a debounced think outlives its triggering call.
-	// With RealClock and the Task 9 gateway, request-scoped contexts are
-	// canceled long before the timer fires — every think would then fail and
-	// read as silence. Values survive; cancellation does not propagate.
-	ctx = context.WithoutCancel(ctx)
 	if ve.cancel != nil {
 		ve.cancel()
 		ve.cancel = nil
@@ -430,7 +439,16 @@ func (o *Orchestrator) scheduleThink(ctx context.Context, ve *voiceEntry, trigge
 			return // superseded; this timer fired before its cancel landed
 		}
 		ve.cancel = nil
-		o.think(ctx, ve, trigger)
+		// Thinks derive from BaseContext, never the triggering call's context:
+		// a debounced think outlives its trigger (with RealClock and the
+		// gateway, request-scoped contexts are canceled long before the timer
+		// fires — every think would then fail and read as silence), while
+		// shutdown canceling BaseContext must still reach in-flight brain
+		// calls. ThinkTimeout bounds the single Think; phase 2 runs off the
+		// lock, so a slow brain stalls only its own voice.
+		tctx, cancel := context.WithTimeout(o.cfg.BaseContext, o.cfg.ThinkTimeout)
+		defer cancel()
+		o.think(tctx, ve, trigger)
 	})
 }
 
@@ -481,7 +499,9 @@ func (o *Orchestrator) exchangeGate(ctx context.Context, ve *voiceEntry, trigger
 // never across the brain call:
 //
 //	phase 1 (locked):   exchange gate; snapshot VoiceView and generation.
-//	phase 2 (unlocked): ve.brain.Think — the only code that runs off the lock.
+//	phase 2 (unlocked): ve.brain.Think — the only code that runs off the lock;
+//	  a panic is recovered into a brain error (belt for the no-panic contract
+//	  on brain.Brain), preserving lock balance.
 //	phase 3 (relocked): discard if superseded (gen mismatch covers newer
 //	  triggers and re-AddVoice); think.error OnDrop, under the lock per its
 //	  contract; exchange gate re-run (the exchange may have closed or capped
@@ -493,7 +513,14 @@ func (o *Orchestrator) think(ctx context.Context, ve *voiceEntry, trigger protoc
 	view := o.view(ve, trigger) // value snapshot, safe off the lock
 	gen := ve.gen
 	o.mu.Unlock()
-	a, err := ve.brain.Think(ctx, view)
+	a, err := func() (a brain.Action, err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("brain panic: %v", r)
+			}
+		}()
+		return ve.brain.Think(ctx, view)
+	}()
 	o.mu.Lock()
 	if ve.gen != gen {
 		return // superseded while thinking: the result is stale, discard silently

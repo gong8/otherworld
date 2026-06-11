@@ -31,6 +31,11 @@ type Action struct {
 }
 
 // Brain is implemented by fake (scripted) and bedrock (LLM-backed) adapters.
+//
+// Implementations must not panic: a panic in Think crashes the voice's timer
+// goroutine. The orchestrator recovers a Think panic as a belt (it reads as a
+// brain error and drops as think.error), but a panic in Relevant — called
+// under the orchestrator lock — is fatal to the scope.
 type Brain interface {
 	// Relevant is the cheap gate: should this voice think at all?
 	// Implementations may ignore Recent to reduce cost.
