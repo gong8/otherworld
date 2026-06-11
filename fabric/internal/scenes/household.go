@@ -51,6 +51,24 @@ func roundHalf(f float64) float64 {
 	return math.Round(f*2) / 2
 }
 
+// speakName renders a voice id the way a voice would say it out loud —
+// "voice:corner-shop" → "the corner shop", "voice:her-agent" → "her agent" —
+// so protocol ids never leak into spoken bodies (the same rule the web
+// client applies to envelope Froms).
+func speakName(voice string) string {
+	bare := strings.ReplaceAll(strings.TrimPrefix(voice, "voice:"), "-", " ")
+	if bare == "" {
+		return "someone"
+	}
+	if rest, ok := strings.CutPrefix(bare, "principal:"); ok {
+		return rest
+	}
+	if bare == "agent" || strings.HasSuffix(bare, " agent") {
+		return bare
+	}
+	return "the " + bare
+}
+
 // Household returns the household scope identifier and the four seeds that
 // populate it.
 func Household() (scope string, seeds []Seed) {
@@ -395,7 +413,7 @@ func ResidentAgentRules() []brain.Rule {
 			principalVoice := "voice:principal:" + bare
 
 			body := fmt.Sprintf("%s offers %s for %d marks. shall i?",
-				v.Trigger.From, tv.Give, tv.PriceMarks)
+				speakName(v.Trigger.From), tv.Give, tv.PriceMarks)
 			return brain.Action{
 				Speak: true,
 				Kind:  protocol.KindAskPrincipal,

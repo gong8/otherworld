@@ -547,6 +547,83 @@ func TestOriginAllowlist(t *testing.T) {
 	}
 }
 
+// TestCORSMirrorsOriginPolicy: the fetch endpoints (claim, consent, state)
+// are called cross-origin by the web client, so the gateway must answer with
+// CORS headers under the same origin policy as the websocket upgrades —
+// wildcard in dev mode (empty Origins), allowlist-gated otherwise — and must
+// answer preflights itself (the method-routing mux would 405 them).
+func TestCORSMirrorsOriginPolicy(t *testing.T) {
+	t.Run("dev mode wildcards", func(t *testing.T) {
+		g := gateway.New(gateway.Config{StateView: func(string) any { return map[string]string{} }})
+		srv := httptest.NewServer(g.Handler())
+		defer srv.Close()
+
+		req, _ := http.NewRequest("GET", srv.URL+"/v0/state?scope=scope:test", nil)
+		req.Header.Set("Origin", "http://localhost:3000")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if got := res.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+			t.Fatalf("state Access-Control-Allow-Origin = %q, want *", got)
+		}
+
+		pre, _ := http.NewRequest("OPTIONS", srv.URL+"/v0/claim", nil)
+		pre.Header.Set("Origin", "http://localhost:3000")
+		pre.Header.Set("Access-Control-Request-Method", "POST")
+		pre.Header.Set("Access-Control-Request-Headers", "Content-Type")
+		res, err = http.DefaultClient.Do(pre)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != http.StatusNoContent {
+			t.Fatalf("preflight status = %d, want 204", res.StatusCode)
+		}
+		if got := res.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+			t.Fatalf("preflight Access-Control-Allow-Origin = %q, want *", got)
+		}
+		if got := res.Header.Get("Access-Control-Allow-Methods"); !strings.Contains(got, "POST") {
+			t.Fatalf("preflight Access-Control-Allow-Methods = %q, want POST", got)
+		}
+		if got := res.Header.Get("Access-Control-Allow-Headers"); !strings.Contains(got, "Content-Type") {
+			t.Fatalf("preflight Access-Control-Allow-Headers = %q, want Content-Type", got)
+		}
+	})
+
+	t.Run("allowlist gates", func(t *testing.T) {
+		g := gateway.New(gateway.Config{
+			Origins:   []string{"allowed.example"},
+			StateView: func(string) any { return map[string]string{} },
+		})
+		srv := httptest.NewServer(g.Handler())
+		defer srv.Close()
+
+		req, _ := http.NewRequest("GET", srv.URL+"/v0/state?scope=scope:test", nil)
+		req.Header.Set("Origin", "https://allowed.example")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if got := res.Header.Get("Access-Control-Allow-Origin"); got != "https://allowed.example" {
+			t.Fatalf("allowed origin got %q, want echo", got)
+		}
+
+		req, _ = http.NewRequest("GET", srv.URL+"/v0/state?scope=scope:test", nil)
+		req.Header.Set("Origin", "https://evil.example")
+		res, err = http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if got := res.Header.Get("Access-Control-Allow-Origin"); got != "" {
+			t.Fatalf("disallowed origin got %q, want no header", got)
+		}
+	})
+}
+
 // TestSlowConsumerDoesNotBlockBroadcast: a feed conn that never reads must
 // not stall Broadcast — it is called from the orchestrator's Append path
 // with the orchestrator mutex held. The conn may be dropped; the world must

@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "otherworld:envelope",
+  "title": "Envelope",
   "type": "object",
   "required": ["v", "id", "ts", "from", "serves", "scope", "kind"],
   "additionalProperties": false,

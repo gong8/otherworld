@@ -5,7 +5,11 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "gen:protocol": "node scripts/gen-protocol.mjs",
+    "test:protocol": "node --test lib/protocol/agreement.test.mjs",
+    "test:web": "node --test lib/protocol/agreement.test.mjs lib/fabric.test.mjs app/world/reducer.test.mjs",
+    "verify:world": "echo 'see docs/superpowers/plans/2026-06-11-world-client.md task W4 — live verification recipe'"
   },
   "dependencies": {
     "next": "16.2.9",
@@ -17,6 +21,7 @@
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "json-schema-to-typescript": "^15.0.4",
     "typescript": "^5.8.0"
   }
 }

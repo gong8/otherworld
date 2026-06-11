@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,12 +76,14 @@ type Config struct {
 	Replay func(scope string, after int64) []Frame
 	// StateView renders scope's world state for /v0/state.
 	StateView func(scope string) any
-	// Origins, when non-empty, is the browser origin allowlist for websocket
-	// upgrades (websocket.AcceptOptions.OriginPatterns). Empty is dev mode:
-	// any origin is accepted — tolerable only because the gateway carries no
-	// cookies or ambient credentials (the feed is public; line and consent
-	// are gated by capability tokens the caller must present explicitly) —
-	// but production wiring (Task 11) should set it.
+	// Origins, when non-empty, is the browser origin allowlist — for
+	// websocket upgrades (websocket.AcceptOptions.OriginPatterns) and for
+	// CORS on the fetch endpoints (claim, consent, state), which the web
+	// client calls cross-origin. Empty is dev mode: any origin is accepted —
+	// tolerable only because the gateway carries no cookies or ambient
+	// credentials (the feed is public; line and consent are gated by
+	// capability tokens the caller must present explicitly) — but production
+	// wiring (Task 11) should set it.
 	Origins []string
 }
 
@@ -120,7 +124,52 @@ func New(cfg Config) *Gateway {
 
 // Handler returns the gateway's routes; the composition root mounts (and may
 // wrap) it.
-func (g *Gateway) Handler() http.Handler { return g.mux }
+func (g *Gateway) Handler() http.Handler { return g.cors(g.mux) }
+
+// cors wraps next with the same origin policy the websocket upgrades use
+// (Config.Origins; empty = dev mode, any origin), expressed as CORS response
+// headers so browsers can call the fetch endpoints (claim, consent, state)
+// cross-origin. No cookies or ambient credentials are involved — authority
+// travels as explicit capability tokens — so a wildcard in dev mode grants
+// nothing the network position didn't already have. Preflights are answered
+// here: the method-routing mux would 405 an OPTIONS otherwise.
+func (g *Gateway) cors(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			if len(g.cfg.Origins) == 0 {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+			} else if originAllowed(g.cfg.Origins, origin) {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Add("Vary", "Origin")
+			}
+		}
+		if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// originAllowed reports whether origin's host matches one of the patterns —
+// the same host-only path.Match rule websocket.AcceptOptions.OriginPatterns
+// applies, so the two halves of Config.Origins can never disagree.
+func originAllowed(patterns []string, origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	for _, p := range patterns {
+		if ok, err := path.Match(p, u.Host); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
 
 // Broadcast fans env — wrapped in a Frame carrying its log seq, the
 // reconnect cursor — out to every feed connection watching env.Scope and to
