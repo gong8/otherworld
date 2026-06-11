@@ -12,8 +12,22 @@ import (
 	"otherworld/fabric/internal/brain"
 	"otherworld/fabric/internal/orchestrator"
 	"otherworld/fabric/internal/protocol"
+	"otherworld/fabric/internal/protocol/termschema"
 	"otherworld/fabric/internal/world"
 )
+
+// termsDir is the proto/terms directory relative to the orchestrator package.
+const termsDir = "../../../proto/terms"
+
+// mustLoadRegistry is a test helper that loads the proto/terms registry.
+func mustLoadRegistry(t *testing.T) *termschema.Registry {
+	t.Helper()
+	r, err := termschema.Load(termsDir)
+	if err != nil {
+		t.Fatalf("termschema.Load(%q): %v", termsDir, err)
+	}
+	return r
+}
 
 // Two rapid triggers to one voice collapse into ONE think, and the think
 // sees the latest trigger.
@@ -465,17 +479,19 @@ func (b errBrain) Think(context.Context, brain.VoiceView) (brain.Action, error) 
 }
 
 // OnDrop fires at every deterministic drop site with the right reason and
-// the acting/failing voice.
-func TestOnDropPinsAllFiveReasons(t *testing.T) {
+// the acting/failing voice. Extended to six reasons including terms.invalid.
+func TestOnDropPinsAllReasons(t *testing.T) {
 	type droprec struct {
 		reason, voice string
 		kind          protocol.Kind
 	}
 	clock := orchestrator.NewFakeClock(time.Date(2026, 6, 11, 3, 0, 0, 0, time.UTC))
 	var drops []droprec
+	reg := mustLoadRegistry(t)
 	o := orchestrator.New(orchestrator.Config{
 		Clock: clock, World: world.New(),
 		DebounceMin: 2 * time.Second, DebounceMax: 2 * time.Second,
+		Terms:  reg,
 		Append: func(protocol.Envelope) {},
 		OnDrop: func(reason, voice string, env protocol.Envelope) {
 			drops = append(drops, droprec{reason, voice, env.Kind})
@@ -503,6 +519,15 @@ func TestOnDropPinsAllFiveReasons(t *testing.T) {
 					Terms: &protocol.Terms{Type: "trade", Value: []byte(`{}`)}}
 			},
 		}}), map[string]any{"lamp": "off"})
+	// bad-payload: in-mandate type but payload violates schema (value 99 > maximum 30).
+	o.AddVoice(ctx, charter("voice:bad-payload", "e", protocol.VoiceThing, []string{"temperature.set"}, true),
+		brain.NewFake([]brain.Rule{{
+			Match: func(v brain.VoiceView) bool { return true },
+			Respond: func(v brain.VoiceView) brain.Action {
+				return brain.Action{Speak: true, Kind: protocol.KindPropose,
+					Terms: &protocol.Terms{Type: "temperature.set", Value: []byte(`99`)}}
+			},
+		}}), map[string]any{"temperature": 21.0})
 
 	// relevant.error — fires synchronously at schedule time.
 	o.PrincipalSays(ctx, "voice:err-rel", "hello")
@@ -522,6 +547,9 @@ func TestOnDropPinsAllFiveReasons(t *testing.T) {
 		Kind:  protocol.KindSettle,
 		Terms: &protocol.Terms{Type: "temperature.set", Value: []byte(`1`)},
 	})
+	// terms.invalid — in-mandate type, payload violates schema.
+	o.PrincipalSays(ctx, "voice:bad-payload", "hello")
+	clock.Advance(10 * time.Second)
 
 	want := []droprec{
 		{"relevant.error", "voice:err-rel", protocol.KindSay},
@@ -529,6 +557,7 @@ func TestOnDropPinsAllFiveReasons(t *testing.T) {
 		{"settle.spoken", "voice:liar", protocol.KindSettle},
 		{"mandate", "voice:rogue", protocol.KindPropose},
 		{"settle.external", "voice:outsider", protocol.KindSettle},
+		{"terms.invalid", "voice:bad-payload", protocol.KindPropose},
 	}
 	if len(drops) != len(want) {
 		t.Fatalf("expected %d drops, got %d: %+v", len(want), len(drops), drops)
@@ -537,6 +566,119 @@ func TestOnDropPinsAllFiveReasons(t *testing.T) {
 		if drops[i] != w {
 			t.Fatalf("drop %d: got %+v, want %+v", i, drops[i], w)
 		}
+	}
+}
+
+// TestTermsInvalidDropped verifies that a propose with an in-mandate but
+// schema-violating payload (temperature.set 99 > maximum 30) is dropped with
+// reason "terms.invalid" and never reaches the record.
+func TestTermsInvalidDropped(t *testing.T) {
+	clock := orchestrator.NewFakeClock(time.Date(2026, 6, 11, 3, 0, 0, 0, time.UTC))
+	var log []protocol.Envelope
+	var dropReason, dropVoice string
+	reg := mustLoadRegistry(t)
+	o := orchestrator.New(orchestrator.Config{
+		Clock: clock, World: world.New(),
+		DebounceMin: 2 * time.Second, DebounceMax: 2 * time.Second,
+		Terms:  reg,
+		Append: func(e protocol.Envelope) { log = append(log, e) },
+		OnDrop: func(reason, voice string, env protocol.Envelope) {
+			dropReason = reason
+			dropVoice = voice
+		},
+	})
+	ctx := context.Background()
+
+	// A brain whose charter allows temperature.set but proposes value 99 (violates schema max 30).
+	badBrain := charter("voice:bad-heating", "the household", protocol.VoiceThing, []string{"temperature.set"}, true)
+	o.AddVoice(ctx, badBrain, brain.NewFake([]brain.Rule{{
+		Match: func(v brain.VoiceView) bool { return v.Trigger.Kind == protocol.KindSay },
+		Respond: func(v brain.VoiceView) brain.Action {
+			return brain.Action{
+				Speak: true, Kind: protocol.KindPropose,
+				To:    []string{v.Trigger.From},
+				Body:  "way too hot",
+				Terms: &protocol.Terms{Type: "temperature.set", Value: []byte(`99`)},
+			}
+		},
+	}}), map[string]any{"temperature": 21.0})
+
+	o.PrincipalSays(ctx, "voice:bad-heating", "turn it up")
+	clock.Advance(10 * time.Second)
+
+	// No propose must reach the record.
+	for _, e := range log {
+		if e.Kind == protocol.KindPropose {
+			t.Fatalf("schema-violating propose must not reach the record: %+v", e)
+		}
+	}
+	if dropReason != "terms.invalid" {
+		t.Fatalf("OnDrop reason = %q, want %q", dropReason, "terms.invalid")
+	}
+	if dropVoice != "voice:bad-heating" {
+		t.Fatalf("OnDrop voice = %q, want %q", dropVoice, "voice:bad-heating")
+	}
+}
+
+// harnessWithRegistry returns a harness identical to harness() but with the
+// proto/terms registry loaded, for golden tests that need schema validation
+// enabled. The existing harness() helper is unchanged so all 18+ existing
+// tests stay untouched.
+func harnessWithRegistry(t *testing.T) (*orchestrator.Orchestrator, *orchestrator.FakeClock, *[]protocol.Envelope) {
+	t.Helper()
+	clock := orchestrator.NewFakeClock(time.Date(2026, 6, 11, 3, 0, 0, 0, time.UTC))
+	var log []protocol.Envelope
+	reg := mustLoadRegistry(t)
+	o := orchestrator.New(orchestrator.Config{
+		Clock:       clock,
+		World:       world.New(),
+		TurnCap:     12,
+		DebounceMin: 2 * time.Second,
+		DebounceMax: 2 * time.Second,
+		Terms:       reg,
+		Append:      func(e protocol.Envelope) { log = append(log, e) },
+	})
+	return o, clock, &log
+}
+
+// TestGoldenCompromiseWithRegistry re-runs the heating compromise golden test
+// with the schema registry enabled to confirm valid proposes still flow.
+func TestGoldenCompromiseWithRegistry(t *testing.T) {
+	o, clock, log := harnessWithRegistry(t)
+	ctx := context.Background()
+
+	heating := charter("voice:heating", "the household", protocol.VoiceThing, []string{"temperature.set"}, true)
+	her := charter("voice:her-agent", "her", protocol.VoicePerson, []string{"temperature.set"}, true)
+
+	o.AddVoice(ctx, heating, brain.NewFake([]brain.Rule{{
+		Match: func(v brain.VoiceView) bool { return v.Trigger.Kind == protocol.KindPropose },
+		Respond: func(v brain.VoiceView) brain.Action {
+			return brain.Action{Speak: true, Kind: protocol.KindAccept, To: []string{v.Trigger.From},
+				Body: "holding the middle.", Terms: v.Trigger.Terms}
+		},
+	}}), map[string]any{"temperature": 21.0})
+	o.AddVoice(ctx, her, brain.NewFake([]brain.Rule{{
+		Match: func(v brain.VoiceView) bool { return v.Trigger.From == "voice:principal:her" },
+		Respond: func(v brain.VoiceView) brain.Action {
+			return brain.Action{Speak: true, Kind: protocol.KindPropose, To: []string{"voice:heating"},
+				Body:  "she is cold again. one degree, please.",
+				Terms: &protocol.Terms{Type: "temperature.set", Value: []byte(`21.5`)}}
+		},
+	}}), nil)
+
+	o.PrincipalSays(ctx, "voice:her-agent", "i'm cold")
+	clock.Advance(10 * time.Second)
+
+	want := "say>propose>accept>settle"
+	if got := kinds(*log); got != want {
+		t.Fatalf("golden mismatch with registry:\n got  %s\n want %s", got, want)
+	}
+	last := (*log)[len(*log)-1]
+	if last.Terms == nil || last.Terms.Type != "temperature.set" {
+		t.Fatal("settle must carry the terms")
+	}
+	if o.WorldView("voice:heating")["temperature"] != 21.5 {
+		t.Fatal("settled terms must hit world state")
 	}
 }
 

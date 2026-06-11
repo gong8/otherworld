@@ -31,6 +31,7 @@ import (
 
 	"otherworld/fabric/internal/brain"
 	"otherworld/fabric/internal/protocol"
+	"otherworld/fabric/internal/protocol/termschema"
 	"otherworld/fabric/internal/world"
 )
 
@@ -60,6 +61,10 @@ type Config struct {
 	// held: it must not call back into the Orchestrator and must not block.
 	// Zero cost when nil.
 	OnDrop func(reason, voice string, env protocol.Envelope)
+	// Terms, when non-nil, validates propose payloads against the proto/terms
+	// schema registry before they reach the record. nil disables payload
+	// validation — unit-test convenience; fabricd always sets it.
+	Terms *termschema.Registry
 	// Scope identifies this orchestrator's scope. Defaults to "scope:test".
 	Scope string
 	// RunID, when set, namespaces exchange ids: "exc_<RunID>_%026d". This
@@ -483,6 +488,15 @@ func (o *Orchestrator) think(ctx context.Context, ve *voiceEntry, trigger protoc
 		if a.Terms == nil || !slices.Contains(ve.charter.Mandate.MayProposeTerms, a.Terms.Type) {
 			o.drop("mandate", ve.charter.Voice, env)
 			return
+		}
+		// SCHEMA GATE (law 6, defense-in-depth): validate the payload against
+		// the proto/terms registry. Order: mandate first (cheaper), schema
+		// second. nil registry disables validation (unit-test convenience).
+		if o.cfg.Terms != nil {
+			if err := o.cfg.Terms.Validate(*a.Terms); err != nil {
+				o.drop("terms.invalid", ve.charter.Voice, env)
+				return
+			}
 		}
 	}
 	o.inject(ctx, env)
