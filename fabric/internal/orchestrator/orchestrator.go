@@ -30,6 +30,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand/v2"
 	"slices"
@@ -63,11 +64,11 @@ type Config struct {
 	Append func(protocol.Envelope)
 	// OnDrop, when set, observes envelopes the orchestrator silently
 	// discards. Reasons: "settle.external", "relevant.error", "think.error",
-	// "settle.spoken", "mandate". voice is the acting/failing voice: the
-	// thinking voice at the relevant.error/think.error/mandate/settle.spoken
-	// sites, env.From at settle.external. Called with the orchestrator mutex
-	// held: it must not call back into the Orchestrator and must not block.
-	// Zero cost when nil.
+	// "settle.spoken", "mandate", "terms.invalid", "consent.required",
+	// "mandate.spend". voice is the acting/failing voice: the thinking voice
+	// at every think-path site, env.From at settle.external. Called with the
+	// orchestrator mutex held: it must not call back into the Orchestrator
+	// and must not block. Zero cost when nil.
 	OnDrop func(reason, voice string, env protocol.Envelope)
 	// Terms, when non-nil, validates propose payloads against the proto/terms
 	// schema registry before they reach the record. nil disables payload
@@ -505,7 +506,8 @@ func (o *Orchestrator) exchangeGate(ctx context.Context, ve *voiceEntry, trigger
 //	phase 3 (relocked): discard if superseded (gen mismatch covers newer
 //	  triggers and re-AddVoice); think.error OnDrop, under the lock per its
 //	  contract; exchange gate re-run (the exchange may have closed or capped
-//	  while we thought); speak, settle.spoken, mandate and terms gates; inject.
+//	  while we thought); speak, settle.spoken, mandate, terms, consent and
+//	  spend gates; inject.
 func (o *Orchestrator) think(ctx context.Context, ve *voiceEntry, trigger protocol.Envelope) {
 	if !o.exchangeGate(ctx, ve, trigger) {
 		return
@@ -564,7 +566,82 @@ func (o *Orchestrator) think(ctx context.Context, ve *voiceEntry, trigger protoc
 			}
 		}
 	}
+	if a.Kind == protocol.KindAccept {
+		// CONSENT + SPEND GATES (law 4): they bind the THINK PATH ONLY, and
+		// that asymmetry is the design, not an accident. A brain-spoken accept
+		// is the voice acting alone — a persuaded LLM could emit `accept`
+		// directly and skirt ask_principal, so the charter is enforced here at
+		// the gate. A gateway-driven accept arrives via the public Inject
+		// funnel (compose.onConsent), which carries no think gates: there the
+		// human has already answered an ask_principal, and the principal's
+		// consent IS the authority the charter demands — gating it would make
+		// the charter outrank the human it exists to protect.
+		if ex := o.settleTarget(env); ex != nil && ex.pending.Terms.Type == "trade" {
+			// Trade moves marks: irreversible, so a charter with
+			// MaySettleWithoutPrincipal == false requires the principal.
+			// Comfort terms (temperature/lamp/curtains) stay agent-acceptable:
+			// a thermostat can be turned back; spent marks cannot.
+			if !ve.charter.Mandate.MaySettleWithoutPrincipal {
+				o.drop("consent.required", ve.charter.Voice, env)
+				return
+			}
+			// SPEND GATE: the price is read from the exchange's pending
+			// propose — the terms that would actually settle — never from the
+			// accept's echo, which a confused brain could understate. Only the
+			// BUYER spends: a seller accepting an offer receives marks, so its
+			// SpendLimitMarks does not bind. Inject-path (consented) accepts
+			// are not spend-gated either — consent is the higher authority.
+			var v struct {
+				PriceMarks int    `json:"price_marks"`
+				Buyer      string `json:"buyer"`
+			}
+			if err := json.Unmarshal(ex.pending.Terms.Value, &v); err == nil &&
+				v.Buyer == ve.charter.Voice && v.PriceMarks > ve.charter.Mandate.SpendLimitMarks {
+				o.drop("mandate.spend", ve.charter.Voice, env)
+				return
+			}
+		}
+		// SCHEMA GATE on the echoed terms: an accept's terms are decoration
+		// (the settle carries the pending propose's terms), but a malformed
+		// echo on the record misleads every voice reading the transcript.
+		// Same registry, same reason, as the propose-side gate above.
+		if a.Terms != nil && o.cfg.Terms != nil {
+			if err := o.cfg.Terms.Validate(*a.Terms); err != nil {
+				o.drop("terms.invalid", ve.charter.Voice, env)
+				return
+			}
+		}
+	}
 	o.inject(ctx, env)
+}
+
+// settleTarget resolves the exchange env would settle were it injected now:
+// the same adoption and matching rules lifecycle applies, with no side
+// effects (excOrder is scanned, never compacted). nil when env settles
+// nothing — no open exchange, no pending terms, the pending proposer
+// accepting their own offer, or an adopted outsider.
+func (o *Orchestrator) settleTarget(env protocol.Envelope) *exchange {
+	id := env.Exchange
+	if id == "" {
+		for _, xid := range o.excOrder {
+			ex := o.exchanges[xid]
+			if ex == nil || ex.closed {
+				continue
+			}
+			if intersects(env.To, ex.participants) {
+				id = xid
+				break
+			}
+		}
+	}
+	ex := o.exchanges[id]
+	if ex == nil || ex.closed || ex.pending == nil || ex.pending.Terms == nil {
+		return nil
+	}
+	if env.From == ex.pending.From || !slices.Contains(ex.participants, env.From) {
+		return nil
+	}
+	return ex
 }
 
 func union(from string, to []string) []string {

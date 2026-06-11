@@ -730,7 +730,8 @@ func (b errBrain) Think(context.Context, brain.VoiceView) (brain.Action, error) 
 }
 
 // OnDrop fires at every deterministic drop site with the right reason and
-// the acting/failing voice. Extended to six reasons including terms.invalid.
+// the acting/failing voice. Extended to eight reasons: consent.required and
+// mandate.spend joined with the consent/spend gates (B4).
 func TestOnDropPinsAllReasons(t *testing.T) {
 	type droprec struct {
 		reason, voice string
@@ -802,6 +803,43 @@ func TestOnDropPinsAllReasons(t *testing.T) {
 	o.PrincipalSays(ctx, "voice:bad-payload", "hello")
 	clock.Advance(10 * time.Second)
 
+	// consent.required — a false-charter voice accepts a trade propose.
+	credulous := protocol.Charter{Voice: "voice:credulous", Serves: "f",
+		Kind: protocol.VoicePerson, Interests: "test",
+		Mandate: protocol.Mandate{MayProposeTerms: []string{"trade"},
+			MaySettleWithoutPrincipal: false, SpendLimitMarks: 100}}
+	acceptBrain := func() *brain.Fake {
+		return brain.NewFake([]brain.Rule{{
+			Match: func(v brain.VoiceView) bool { return v.Trigger.Kind == protocol.KindPropose },
+			Respond: func(v brain.VoiceView) brain.Action {
+				return brain.Action{Speak: true, Kind: protocol.KindAccept,
+					To: []string{v.Trigger.From}, Terms: v.Trigger.Terms}
+			},
+		}})
+	}
+	o.AddVoice(ctx, credulous, acceptBrain(), nil)
+	o.Inject(ctx, protocol.Envelope{
+		From: "voice:tempter", Serves: "x", Scope: o.ScopeID(),
+		Kind: protocol.KindPropose, To: []string{"voice:credulous"},
+		Terms: &protocol.Terms{Type: "trade", Value: []byte(
+			`{"give":"one biscuit","get":"marks","price_marks":3,"buyer":"voice:credulous","seller":"voice:tempter"}`)},
+	})
+	clock.Advance(10 * time.Second)
+
+	// mandate.spend — an autonomous accepter (buyer) over its spend limit.
+	spender := protocol.Charter{Voice: "voice:spender", Serves: "g",
+		Kind: protocol.VoicePerson, Interests: "test",
+		Mandate: protocol.Mandate{MayProposeTerms: []string{"trade"},
+			MaySettleWithoutPrincipal: true, SpendLimitMarks: 2}}
+	o.AddVoice(ctx, spender, acceptBrain(), nil)
+	o.Inject(ctx, protocol.Envelope{
+		From: "voice:tempter", Serves: "x", Scope: o.ScopeID(),
+		Kind: protocol.KindPropose, To: []string{"voice:spender"},
+		Terms: &protocol.Terms{Type: "trade", Value: []byte(
+			`{"give":"one biscuit","get":"marks","price_marks":3,"buyer":"voice:spender","seller":"voice:tempter"}`)},
+	})
+	clock.Advance(10 * time.Second)
+
 	want := []droprec{
 		{"relevant.error", "voice:err-rel", protocol.KindSay},
 		{"think.error", "voice:err-think", protocol.KindSay},
@@ -809,6 +847,8 @@ func TestOnDropPinsAllReasons(t *testing.T) {
 		{"mandate", "voice:rogue", protocol.KindPropose},
 		{"settle.external", "voice:outsider", protocol.KindSettle},
 		{"terms.invalid", "voice:bad-payload", protocol.KindPropose},
+		{"consent.required", "voice:credulous", protocol.KindAccept},
+		{"mandate.spend", "voice:spender", protocol.KindAccept},
 	}
 	if len(drops) != len(want) {
 		t.Fatalf("expected %d drops, got %d: %+v", len(want), len(drops), drops)
