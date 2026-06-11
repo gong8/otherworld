@@ -618,3 +618,39 @@ func TestCreditAdjustsMarks(t *testing.T) {
 		t.Fatalf("marks = %d, want 97", got)
 	}
 }
+
+// TestRunIDNamespacesExchangeIDs: when Config.RunID is set, new exchange ids
+// must be of the form "exc_<RunID>_%026d", not the bare "exc_%026d". Utterance
+// ids are left for the composition root to rewrite.
+func TestRunIDNamespacesExchangeIDs(t *testing.T) {
+	clock := orchestrator.NewFakeClock(time.Date(2026, 6, 11, 3, 0, 0, 0, time.UTC))
+	var log []protocol.Envelope
+	const runID = "abc123"
+	o := orchestrator.New(orchestrator.Config{
+		Clock:       clock,
+		World:       world.New(),
+		DebounceMin: 2 * time.Second,
+		DebounceMax: 2 * time.Second,
+		RunID:       runID,
+		Append:      func(e protocol.Envelope) { log = append(log, e) },
+	})
+	ctx := context.Background()
+	o.Inject(ctx, protocol.Envelope{
+		From: "voice:her-agent", Serves: "her", Scope: o.ScopeID(),
+		Kind: protocol.KindPropose, To: []string{"voice:heating"},
+		Terms: &protocol.Terms{Type: "temperature.set", Value: []byte(`22`)},
+	})
+
+	if len(log) == 0 {
+		t.Fatal("propose not appended")
+	}
+	excID := log[0].Exchange
+	wantPrefix := "exc_" + runID + "_"
+	if !strings.HasPrefix(excID, wantPrefix) {
+		t.Fatalf("exchange id %q: want prefix %q", excID, wantPrefix)
+	}
+	// schema pattern ^exc_ still satisfied
+	if !strings.HasPrefix(excID, "exc_") {
+		t.Fatalf("exchange id %q: must start with exc_", excID)
+	}
+}

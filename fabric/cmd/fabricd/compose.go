@@ -76,11 +76,32 @@ type server struct {
 	stop chan struct{}   // closed by close(): writers drain their queues and exit
 	wg   sync.WaitGroup
 
-	mu        sync.Mutex
-	claimed   map[string]string         // claimed agent voice → scope
-	persons   map[string]int            // scope → claimed person count
-	exchanges map[string]exchangeInfo   // exchange id → owner, from the append stream
+	mu      sync.Mutex
+	claimed map[string]string // claimed agent voice → scope
+	persons map[string]int    // scope → claimed person count
+	// exchanges is the consent index: exchange id → (scope, last proposer).
+	//
+	// Two cases that are never pruned by this path:
+	//   1. world-rejected settles — the orchestrator synthesizes a decline
+	//      (not a withdraw), so the KindWithdraw/KindSettle branch below never
+	//      fires; the exchange entry lingers until the server restarts.
+	//   2. quiet exchanges (no turn cap hit, no counter-offer back) — an
+	//      exchange that goes silent never reaches the turn cap and never emits
+	//      a settle or withdraw, so index/delete is never called.
+	// Pruning on decline would be wrong: a decline can precede a counter-offer
+	// (the proposer may renegotiate rather than withdraw), so the exchange is
+	// still live when the decline lands.
+	//
+	// This is a per-boot map. Its size is bounded by the number of
+	// failed/quiet exchanges in a single run — in practice a small constant.
+	// A v2 fix is a close-notification from the orchestrator (which already
+	// tracks outcomes) or a periodic Pending-sweep over known ids.
+	exchanges map[string]exchangeInfo
 	marks     map[string]map[string]int // scope → voice → marks (shadow ledger)
+	// storeFails is the per-scope consecutive store-failure counter used to
+	// surface the degraded state: the feed never shows what isn't recorded;
+	// degraded tells the operator the record is stalling while the world advances.
+	storeFails map[string]int
 }
 
 // newServer composes the world: store, two orchestrators (household, street),
@@ -97,16 +118,17 @@ func newServer(ctx context.Context, cfg config) (*server, error) {
 		return nil, fmt.Errorf("run id: %w", err)
 	}
 	s := &server{
-		cfg:       cfg,
-		store:     st,
-		scopes:    map[string]*scopeState{},
-		runID:     hex.EncodeToString(nonce[:]),
-		ctx:       ctx,
-		stop:      make(chan struct{}),
-		claimed:   map[string]string{},
-		persons:   map[string]int{},
-		exchanges: map[string]exchangeInfo{},
-		marks:     map[string]map[string]int{},
+		cfg:        cfg,
+		store:      st,
+		scopes:     map[string]*scopeState{},
+		runID:      hex.EncodeToString(nonce[:]),
+		ctx:        ctx,
+		stop:       make(chan struct{}),
+		claimed:    map[string]string{},
+		persons:    map[string]int{},
+		exchanges:  map[string]exchangeInfo{},
+		marks:      map[string]map[string]int{},
+		storeFails: map[string]int{},
 	}
 	s.gw = gateway.New(gateway.Config{
 		OnPrincipalSay: s.onPrincipalSay,
@@ -156,6 +178,7 @@ func (s *server) addScope(ctx context.Context, scope string, seeds []scenes.Seed
 		DebounceMin: s.cfg.debounceMin,
 		DebounceMax: s.cfg.debounceMax,
 		Scope:       scope,
+		RunID:       s.runID,
 		// Append runs under the orchestrator mutex: enqueue only, never
 		// block. A full queue drops the envelope — loudly; the writer
 		// goroutine owns persist-then-broadcast order.
@@ -207,6 +230,8 @@ func (s *server) close() {
 // in append order. On stop it drains what the orchestrator already accepted,
 // then exits. The queue is never closed — a debounced think's timer may fire
 // during shutdown and Append once more; that envelope parks in the buffer.
+// The drain is bounded to 10s total; any envelopes still parked after that are
+// logged so the operator knows the record is incomplete.
 func (s *server) writer(sc *scopeState) {
 	defer s.wg.Done()
 	for {
@@ -214,9 +239,16 @@ func (s *server) writer(sc *scopeState) {
 		case env := <-sc.appendQ:
 			s.record(env)
 		case <-s.stop:
+			deadline := time.Now().Add(10 * time.Second)
 			for {
 				select {
 				case env := <-sc.appendQ:
+					if time.Now().After(deadline) {
+						parked := len(sc.appendQ) + 1 // +1 for this env
+						slog.Error("drain deadline exceeded; envelopes parked",
+							"scope", env.Scope, "parked", parked)
+						return
+					}
 					s.record(env)
 				default:
 					return
@@ -245,10 +277,17 @@ func (s *server) record(env protocol.Envelope) {
 	seq, err := s.store.AppendUtterance(ctx, env.ID, env.TS, env.Scope, payload)
 	cancel()
 	if err != nil {
+		s.mu.Lock()
+		s.storeFails[env.Scope]++
+		fails := s.storeFails[env.Scope]
+		s.mu.Unlock()
 		slog.Error("append: store failed; envelope NOT broadcast",
-			"id", env.ID, "kind", env.Kind, "scope", env.Scope, "err", err)
+			"id", env.ID, "kind", env.Kind, "scope", env.Scope, "consecutive_failures", fails, "err", err)
 		return
 	}
+	s.mu.Lock()
+	s.storeFails[env.Scope] = 0
+	s.mu.Unlock()
 	s.gw.Broadcast(seq, env)
 }
 
@@ -296,7 +335,7 @@ func (s *server) index(env protocol.Envelope) {
 func (s *server) onClaim(scope, name string) (string, error) {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if !claimNameRE.MatchString(name) {
-		return "", fmt.Errorf("name must be 1-24 chars: lowercase letters, digits, hyphens")
+		return "", fmt.Errorf("%w: name must be 1-24 chars: lowercase letters, digits, hyphens", gateway.ErrInvalid)
 	}
 	sc := s.scopes[scope]
 	if sc == nil {
@@ -428,14 +467,18 @@ func (s *server) stateView(scope string) any {
 		}
 	}
 	out := map[string]any{"scope": scope, "things": things}
+	s.mu.Lock()
+	fails := s.storeFails[scope]
 	if sc.showMarks {
-		s.mu.Lock()
 		marks := make(map[string]int, len(s.marks[scope]))
 		for v, m := range s.marks[scope] {
 			marks[v] = m
 		}
-		s.mu.Unlock()
 		out["marks"] = marks
+	}
+	s.mu.Unlock()
+	if fails > 3 {
+		out["degraded"] = true
 	}
 	return out
 }

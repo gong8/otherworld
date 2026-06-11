@@ -385,6 +385,29 @@ func TestClaimErrors(t *testing.T) {
 	}
 }
 
+// TestClaimInvalidReturns400: an OnClaim error wrapping ErrInvalid must map to
+// 400 Bad Request, not 409. The distinction matters: 409 means "structurally
+// valid but unavailable"; 400 means "the request itself is malformed".
+func TestClaimInvalidReturns400(t *testing.T) {
+	g := gateway.New(gateway.Config{
+		OnClaim: func(scope, name string) (string, error) {
+			return "", fmt.Errorf("%w: name must be 1-24 chars", gateway.ErrInvalid)
+		},
+	})
+	srv := httptest.NewServer(g.Handler())
+	defer srv.Close()
+
+	body, _ := json.Marshal(map[string]string{"scope": "scope:test", "name": "INVALID_NAME!!!"})
+	resp, err := http.Post(srv.URL+"/v0/claim", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("ErrInvalid claim: status %d, want 400", resp.StatusCode)
+	}
+}
+
 func TestStateServesViewJSON(t *testing.T) {
 	g := gateway.New(gateway.Config{
 		StateView: func(scope string) any { return map[string]string{"scope": scope, "lamp": "on"} },

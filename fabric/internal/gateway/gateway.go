@@ -19,6 +19,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -29,6 +30,12 @@ import (
 
 	"otherworld/fabric/internal/protocol"
 )
+
+// ErrInvalid is returned by OnClaim when the request is structurally invalid
+// (e.g. a name that violates the allowed format). The gateway maps this to
+// 400 Bad Request. Any other error becomes 409 Conflict — the caller's slot
+// or name was unavailable.
+var ErrInvalid = errors.New("invalid claim")
 
 const (
 	// sendBuffer is each connection's outgoing queue depth. Broadcast never
@@ -354,7 +361,11 @@ func (g *Gateway) handleClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	voice, err := g.cfg.OnClaim(req.Scope, req.Name)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
+		if errors.Is(err, ErrInvalid) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		} else {
+			http.Error(w, err.Error(), http.StatusConflict)
+		}
 		return
 	}
 	token, err := newToken()

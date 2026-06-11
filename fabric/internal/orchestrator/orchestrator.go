@@ -62,6 +62,11 @@ type Config struct {
 	OnDrop func(reason, voice string, env protocol.Envelope)
 	// Scope identifies this orchestrator's scope. Defaults to "scope:test".
 	Scope string
+	// RunID, when set, namespaces exchange ids: "exc_<RunID>_%026d". This
+	// keeps exchange ids unique across boots in the accumulated transcript.
+	// Utterance ids are left as-is ("utt_%026d") — the composition root
+	// already rewrites those with its own run+scope prefix.
+	RunID string
 }
 
 type Orchestrator struct {
@@ -278,7 +283,12 @@ func (o *Orchestrator) lifecycle(env *protocol.Envelope) *exchange {
 	if env.Kind == protocol.KindPropose && env.Exchange == "" {
 		// A bare propose crystallizes a new exchange.
 		o.excSeq++
-		id := fmt.Sprintf("exc_%026d", o.excSeq)
+		var id string
+		if o.cfg.RunID != "" {
+			id = fmt.Sprintf("exc_%s_%026d", o.cfg.RunID, o.excSeq)
+		} else {
+			id = fmt.Sprintf("exc_%026d", o.excSeq)
+		}
 		env.Exchange = id
 		cp := *env
 		ex := &exchange{id: id, participants: union(env.From, env.To), turns: 1, pending: &cp}

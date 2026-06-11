@@ -77,7 +77,7 @@ func TestE2EDemoScript(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cold := readFrames(t, wsCtx, feedHH, 4)
+	cold := readFrames(t, wsCtx, feedHH, 4, "cold beat")
 	assertKinds(t, "cold beat", cold, protocol.KindSay, protocol.KindPropose, protocol.KindAccept, protocol.KindSettle)
 	assertMonotonic(t, "cold beat", 0, cold)
 	if cold[1].Env.From != herVoice || !slices.Contains(cold[1].Env.To, "voice:heating") {
@@ -101,7 +101,7 @@ func TestE2EDemoScript(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	hot := readFrames(t, wsCtx, feedHH, 5)
+	hot := readFrames(t, wsCtx, feedHH, 5, "compromise beat")
 	assertKinds(t, "compromise beat", hot,
 		protocol.KindSay, protocol.KindPropose, protocol.KindPropose, protocol.KindAccept, protocol.KindSettle)
 	assertMonotonic(t, "compromise beat", cold[3].Seq, hot)
@@ -127,7 +127,7 @@ func TestE2EDemoScript(t *testing.T) {
 	// Replay: a reconnect cursored at this run's first seq replays exactly
 	// this run's nine household frames, store-first order preserved.
 	reFeed := dialWS(t, wsCtx, srv, fmt.Sprintf("/v0/feed?scope=scope:household&after=%d", cold[0].Seq-1))
-	replayed := readFrames(t, wsCtx, reFeed, 9)
+	replayed := readFrames(t, wsCtx, reFeed, 9, "replay")
 	assertKinds(t, "replay", replayed,
 		protocol.KindSay, protocol.KindPropose, protocol.KindAccept, protocol.KindSettle,
 		protocol.KindSay, protocol.KindPropose, protocol.KindPropose, protocol.KindAccept, protocol.KindSettle)
@@ -144,7 +144,7 @@ func TestE2EDemoScript(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	street := readFrames(t, wsCtx, feedST, 4)
+	street := readFrames(t, wsCtx, feedST, 4, "street beat")
 	assertKinds(t, "street beat", street,
 		protocol.KindSay, protocol.KindHail, protocol.KindPropose, protocol.KindAskPrincipal)
 	assertMonotonic(t, "street beat", 0, street)
@@ -163,7 +163,7 @@ func TestE2EDemoScript(t *testing.T) {
 
 	consent(t, srv, visitorToken, ask.Env.Exchange, true)
 
-	settled := readFrames(t, wsCtx, feedST, 2)
+	settled := readFrames(t, wsCtx, feedST, 2, "trade close")
 	assertKinds(t, "trade close", settled, protocol.KindAccept, protocol.KindSettle)
 	if settled[0].Env.From != visitorVoice || settled[0].Env.Terms == nil {
 		t.Fatalf("consent accept: from %q terms %+v", settled[0].Env.From, settled[0].Env.Terms)
@@ -262,11 +262,20 @@ func readFrame(t *testing.T, ctx context.Context, conn *websocket.Conn) gateway.
 	return frame
 }
 
-func readFrames(t *testing.T, ctx context.Context, conn *websocket.Conn, n int) []gateway.Frame {
+func readFrames(t *testing.T, ctx context.Context, conn *websocket.Conn, n int, beat string) []gateway.Frame {
 	t.Helper()
 	frames := make([]gateway.Frame, 0, n)
 	for len(frames) < n {
-		frames = append(frames, readFrame(t, ctx, conn))
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatalf("readFrames(%s): timeout or error after %d/%d frames: %v; frames so far: %v",
+				beat, len(frames), n, err, frames)
+		}
+		var frame gateway.Frame
+		if err := json.Unmarshal(data, &frame); err != nil {
+			t.Fatalf("readFrames(%s): unmarshal: %v", beat, err)
+		}
+		frames = append(frames, frame)
 	}
 	return frames
 }
