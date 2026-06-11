@@ -3,3 +3,4 @@ proto/
 infra/
 docker-compose.yml
 Makefile
+docs/

@@ -1,5 +1,7 @@
 DB_URL=postgres://otherworld:otherworld@localhost:5433/fabric?sslmode=disable
 
+.PHONY: dev test test-db up sqlc
+
 dev: ## run the world locally with fake brains
 	cd fabric && DATABASE_URL=$(DB_URL) go run ./cmd/fabricd -brains fake -addr :8080
 
@@ -13,4 +15,4 @@ up:
 	docker compose up -d postgres
 
 sqlc:
-	cd fabric && sqlc generate
+	cd fabric && go run github.com/sqlc-dev/sqlc/cmd/sqlc@latest generate
