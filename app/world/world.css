@@ -65,13 +65,15 @@
   }
 }
 
-/* a settle is a ledger entry: ruled above and below */
+/* a settle is a ledger entry: ruled above and below. balance keeps a
+   wrapped entry from orphaning half a name on its second line. */
 .world .settle {
   margin: 1.7rem 0;
   padding: 0.85rem 0;
   border-top: 1px solid var(--hairline);
   border-bottom: 1px solid var(--hairline);
   text-align: center;
+  text-wrap: balance;
 }
 
 /* ---- consent prompts ---- */

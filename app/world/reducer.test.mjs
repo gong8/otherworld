@@ -258,7 +258,7 @@ describe("prompt add/remove", () => {
     kind: "ask_principal",
     from: "voice:her-agent",
     exchange: "exch_5",
-    body: "voice:corner-shop offers one biscuit for 3 marks. shall i?",
+    body: "the corner shop offers one biscuit for 3 marks. shall i?",
   };
 
   it("adds a prompt and dedupes by exchange", () => {
@@ -338,6 +338,22 @@ describe("feed status and state line", () => {
     assert.equal(worldReducer(s, { type: "status", channel: "line", status: "open" }), s);
     s = worldReducer(s, { type: "status", channel: "feed", status: "open" });
     assert.equal(worldReducer(s, { type: "status", channel: "feed", status: "open" }), s);
+  });
+
+  it("a feed reopening after a drop re-arms the state fetch", () => {
+    let s = worldReducer(initialWorld(SCOPE), { type: "status", channel: "feed", status: "open" });
+    s = worldReducer(s, { type: "stateLine", text: "the household · 21.0°" });
+    assert.equal(s.stateStale, false);
+    s = worldReducer(s, { type: "status", channel: "feed", status: "closed" });
+    assert.equal(s.stateStale, false); // a drop alone changes nothing
+    s = worldReducer(s, { type: "status", channel: "feed", status: "open" });
+    assert.equal(s.stateStale, true); // the present may have moved: refetch
+  });
+
+  it("the first feed open does not re-arm the state fetch", () => {
+    let s = worldReducer(initialWorld(SCOPE), { type: "stateLine", text: "x" });
+    s = worldReducer(s, { type: "status", channel: "feed", status: "open" });
+    assert.equal(s.stateStale, false); // null → open is a fresh page, not a gap
   });
 
   it("stateLine sets the text and disarms the refresh", () => {

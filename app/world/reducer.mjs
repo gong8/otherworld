@@ -240,7 +240,11 @@ export function worldReducer(s, a) {
       if (a.channel === "line") {
         return s.lineOpen === open ? s : { ...s, lineOpen: open };
       }
-      return s.feedOpen === open ? s : { ...s, feedOpen: open };
+      if (s.feedOpen === open) return s;
+      // a feed reopening after a drop may have missed the present: the
+      // state line is the page's only claim about NOW, so refetch it.
+      const reopened = s.feedOpen === false && open;
+      return { ...s, feedOpen: open, stateStale: s.stateStale || reopened };
     }
 
     case "claimed":
