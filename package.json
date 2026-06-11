@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "bash scripts/dev.sh",
+    "dev:web": "next dev",
     "build": "next build",
     "start": "next start",
     "gen:protocol": "node scripts/gen-protocol.mjs",
