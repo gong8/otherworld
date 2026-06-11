@@ -19,16 +19,18 @@ type Handler func(ctx context.Context, env protocol.Envelope)
 type Runtime struct {
 	mu        sync.RWMutex
 	mailboxes map[string]chan protocol.Envelope
-	crashHook func(voice string)
+	crashHook func(voice string, cause any)
 }
 
 // New returns a Runtime with a no-op crash hook.
-func New() *Runtime { return NewWithCrashHook(func(string) {}) }
+func New() *Runtime { return NewWithCrashHook(func(string, any) {}) }
 
-// NewWithCrashHook returns a Runtime that calls hook(voice) whenever a
-// handler panics. The hook is called synchronously inside the goroutine that
-// caught the panic, so it must not block.
-func NewWithCrashHook(hook func(voice string)) *Runtime {
+// NewWithCrashHook returns a Runtime that calls hook(voice, cause) whenever a
+// handler panics, where cause is the recovered panic value. The hook runs on
+// the voice's goroutine and must not block; a blocking hook stalls the voice —
+// its mailbox stops draining, and if the hook (directly or indirectly) waits
+// on that voice making progress, the voice deadlocks.
+func NewWithCrashHook(hook func(voice string, cause any)) *Runtime {
 	return &Runtime{mailboxes: map[string]chan protocol.Envelope{}, crashHook: hook}
 }
 
@@ -36,6 +38,10 @@ func NewWithCrashHook(hook func(voice string)) *Runtime {
 // already registered, Spawn is a no-op. The goroutine runs until ctx is
 // canceled. The mailbox is NOT removed from the map when the context is
 // canceled — callers that want Deliver to return false must also call Despawn.
+//
+// Spawning with an already-canceled context registers a mailbox whose loop
+// exits immediately; Deliver will return true but nothing will drain. Callers
+// own context hygiene.
 func (r *Runtime) Spawn(ctx context.Context, voice string, h Handler) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -64,7 +70,7 @@ func (r *Runtime) loop(ctx context.Context, voice string, mb chan protocol.Envel
 func (r *Runtime) handleOne(ctx context.Context, voice string, env protocol.Envelope, h Handler) {
 	defer func() {
 		if rec := recover(); rec != nil {
-			r.crashHook(voice)
+			r.crashHook(voice, rec)
 		}
 	}()
 	h(ctx, env)
@@ -93,6 +99,10 @@ func (r *Runtime) Deliver(voice string, env protocol.Envelope) bool {
 // when its context is canceled. The composition root is expected to cancel the
 // per-voice context AND call Despawn so that both the goroutine and the map
 // entry are cleaned up.
+//
+// Always cancel the per-voice context BEFORE calling Despawn — Despawn only
+// unregisters the mailbox; calling it first leaves a live loop draining an
+// orphaned channel.
 func (r *Runtime) Despawn(voice string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

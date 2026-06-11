@@ -27,8 +27,14 @@ func TestDeliverInvokesHandler(t *testing.T) {
 }
 
 func TestPanicRestartsVoiceAndReportsCrash(t *testing.T) {
-	crashed := make(chan string, 1)
-	r := runtime.NewWithCrashHook(func(voice string) { crashed <- voice })
+	type crash struct {
+		voice string
+		cause any
+	}
+	crashed := make(chan crash, 1)
+	r := runtime.NewWithCrashHook(func(voice string, cause any) {
+		crashed <- crash{voice: voice, cause: cause}
+	})
 	first := true
 	var handled atomic.Int32
 	r.Spawn(context.Background(), "voice:door", func(ctx context.Context, env protocol.Envelope) {
@@ -40,9 +46,12 @@ func TestPanicRestartsVoiceAndReportsCrash(t *testing.T) {
 	})
 	r.Deliver("voice:door", protocol.Envelope{ID: "utt_1"}) // panics
 	select {
-	case v := <-crashed:
-		if v != "voice:door" {
-			t.Fatalf("crash hook got %q", v)
+	case c := <-crashed:
+		if c.voice != "voice:door" {
+			t.Fatalf("crash hook got voice %q", c.voice)
+		}
+		if c.cause != "brain melted" {
+			t.Fatalf("crash hook got cause %v, want %q", c.cause, "brain melted")
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("crash hook never called")
