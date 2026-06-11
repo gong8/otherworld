@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "otherworld:envelope",
+  "type": "object",
+  "required": ["v", "id", "ts", "from", "serves", "scope", "kind"],
+  "additionalProperties": false,
+  "properties": {
+    "v": { "const": 0 },
+    "id": { "type": "string", "pattern": "^utt_" },
+    "ts": { "type": "string", "format": "date-time" },
+    "from": { "type": "string", "pattern": "^voice:" },
+    "serves": { "type": "string", "minLength": 1 },
+    "scope": { "type": "string", "pattern": "^scope:" },
+    "to": { "type": "array", "items": { "type": "string", "pattern": "^voice:" } },
+    "kind": { "enum": ["say", "hail", "propose", "accept", "decline", "withdraw", "ask_principal", "settle"] },
+    "exchange": { "type": "string", "pattern": "^exc_" },
+    "body": { "type": "string" },
+    "terms": {
+      "type": "object",
+      "required": ["type", "value"],
+      "additionalProperties": false,
+      "properties": { "type": { "type": "string" }, "value": {} }
+    }
+  }
+}

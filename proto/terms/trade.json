@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "otherworld:terms:trade",
+  "type": "object",
+  "required": ["type", "value"],
+  "properties": {
+    "type": { "const": "trade" },
+    "value": {
+      "type": "object",
+      "required": ["give", "get", "price_marks", "buyer", "seller"],
+      "properties": {
+        "give": { "type": "string" }, "get": { "type": "string" },
+        "price_marks": { "type": "integer", "minimum": 0 },
+        "buyer": { "type": "string", "pattern": "^voice:" },
+        "seller": { "type": "string", "pattern": "^voice:" }
+      }
+    }
+  }
+}
