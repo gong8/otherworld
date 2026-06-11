@@ -3,7 +3,8 @@ package brain
 import "context"
 
 // Rule drives deterministic, scriptable voices for tests, local dev, and
-// offline demos. First matching rule wins.
+// offline demos. First matching rule wins. Match must be a pure function of
+// VoiceView — it is called more than once per utterance.
 type Rule struct {
 	Match   func(VoiceView) bool
 	Respond func(VoiceView) Action
@@ -30,5 +31,5 @@ func (f *Fake) Think(_ context.Context, v VoiceView) (Action, error) {
 			return r.Respond(v), nil
 		}
 	}
-	return Action{Quiet: true}, nil
+	return Action{}, nil
 }

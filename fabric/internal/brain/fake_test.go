@@ -15,7 +15,7 @@ func TestFakeBrainMatchesRuleAndResponds(t *testing.T) {
 			return strings.Contains(v.Trigger.Body, "cold")
 		},
 		Respond: func(v brain.VoiceView) brain.Action {
-			return brain.Action{Kind: protocol.KindPropose, Body: "one degree, then.",
+			return brain.Action{Speak: true, Kind: protocol.KindPropose, Body: "one degree, then.",
 				Terms: &protocol.Terms{Type: "temperature.set", Value: []byte(`21.5`)}}
 		},
 	}})
@@ -31,7 +31,7 @@ func TestFakeBrainMatchesRuleAndResponds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Quiet || a.Terms == nil || a.Terms.Type != "temperature.set" {
+	if !(a.Speak && a.Terms != nil && a.Terms.Type == "temperature.set") {
 		t.Fatalf("unexpected action: %+v", a)
 	}
 }
@@ -49,7 +49,7 @@ func TestFakeBrainQuietWhenNoRuleMatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !a.Quiet {
+	if a.Speak {
 		t.Fatal("no rules → quiet")
 	}
 }
