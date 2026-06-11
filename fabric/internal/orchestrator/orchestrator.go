@@ -46,24 +46,39 @@ type Config struct {
 	DebounceMin time.Duration
 	DebounceMax time.Duration
 	// Append is the event log sink, called exactly once per recorded
-	// envelope, synchronously. The orchestrator never blocks here: the
-	// callback owns any buffering it needs.
+	// envelope, synchronously and WITH the orchestrator mutex held: calling
+	// back into the Orchestrator deadlocks (the mutex is not reentrant), and
+	// blocking here stalls the whole scope — the callback owns any buffering
+	// it needs. Task 9's Broadcast must hand off to per-conn writer
+	// goroutines, never write sockets synchronously.
 	Append func(protocol.Envelope)
+	// OnDrop, when set, observes envelopes the orchestrator silently
+	// discards. Reasons: "settle.external", "relevant.error", "think.error",
+	// "settle.spoken", "mandate". Called with the orchestrator mutex held:
+	// it must not call back into the Orchestrator and must not block.
+	// Zero cost when nil.
+	OnDrop func(reason string, env protocol.Envelope)
 	// Scope identifies this orchestrator's scope. Defaults to "scope:test".
 	Scope string
 }
 
 type Orchestrator struct {
-	mu        sync.Mutex
-	cfg       Config
-	voices    map[string]*voiceEntry
-	order     []string // registration order, for deterministic broadcast
-	recent    []protocol.Envelope
+	mu     sync.Mutex
+	cfg    Config
+	voices map[string]*voiceEntry
+	order  []string // registration order, for deterministic broadcast
+	recent []protocol.Envelope
+	// exchanges: closed exchanges are tombstones — think consults them to
+	// drop replies into abandoned exchanges. Reaping needs a grace period
+	// ≥ one debounce window or replies into abandoned exchanges reach the
+	// record as dangling-id envelopes.
 	exchanges map[string]*exchange
-	excOrder  []string // creation order, for deterministic adoption
-	uttSeq    uint64
-	excSeq    uint64
-	rng       *rand.Rand
+	// excOrder lists exchanges in creation order for deterministic adoption;
+	// closed ids are compacted out during the adoption scan.
+	excOrder []string
+	uttSeq   uint64
+	excSeq   uint64
+	rng      *rand.Rand
 }
 
 type voiceEntry struct {
@@ -83,6 +98,9 @@ type exchange struct {
 }
 
 func New(cfg Config) *Orchestrator {
+	if cfg.Clock == nil {
+		panic("orchestrator: Config.Clock is required")
+	}
 	if cfg.TurnCap <= 0 {
 		cfg.TurnCap = 12
 	}
@@ -160,12 +178,20 @@ func (o *Orchestrator) PrincipalSays(ctx context.Context, agentVoice, text strin
 // the internal accept→synthesis path: settleExchange calls the private
 // inject funnel directly, which carries no such filter.
 func (o *Orchestrator) Inject(ctx context.Context, env protocol.Envelope) {
-	if env.Kind == protocol.KindSettle {
-		return
-	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if env.Kind == protocol.KindSettle {
+		o.drop("settle.external", env)
+		return
+	}
 	o.inject(ctx, env)
+}
+
+// drop reports a silently discarded envelope to OnDrop, if set. Lock held.
+func (o *Orchestrator) drop(reason string, env protocol.Envelope) {
+	if o.cfg.OnDrop != nil {
+		o.cfg.OnDrop(reason, env)
+	}
 }
 
 // inject is the single funnel for every envelope: identity, lifecycle,
@@ -204,14 +230,21 @@ func (o *Orchestrator) inject(ctx context.Context, env protocol.Envelope) {
 func (o *Orchestrator) lifecycle(env *protocol.Envelope) *exchange {
 	// Adoption: an accept/decline without an exchange id whose To intersects
 	// an open exchange's participants inherits that exchange (first open
-	// exchange in creation order wins).
+	// exchange in creation order wins). The scan compacts closed ids out of
+	// excOrder as it goes; the exchanges map keeps them as tombstones.
 	if env.Exchange == "" && (env.Kind == protocol.KindAccept || env.Kind == protocol.KindDecline) {
+		open := o.excOrder[:0]
 		for _, id := range o.excOrder {
-			if ex := o.exchanges[id]; !ex.closed && intersects(env.To, ex.participants) {
+			ex := o.exchanges[id]
+			if ex.closed {
+				continue
+			}
+			open = append(open, id)
+			if env.Exchange == "" && intersects(env.To, ex.participants) {
 				env.Exchange = id
-				break
 			}
 		}
+		o.excOrder = open
 	}
 
 	if env.Kind == protocol.KindPropose && env.Exchange == "" {
@@ -312,11 +345,23 @@ func (o *Orchestrator) route(ctx context.Context, env protocol.Envelope) {
 
 // scheduleThink gates on relevance now, then debounces the think. Only one
 // think may be pending per voice: a newer trigger replaces the older one.
+// Note that Relevant runs at schedule time, so an irrelevant trigger does
+// NOT displace a pending think — moving Relevant to fire time would change
+// that semantics.
 func (o *Orchestrator) scheduleThink(ctx context.Context, ve *voiceEntry, trigger protocol.Envelope) {
 	rel, err := ve.brain.Relevant(ctx, o.view(ve, trigger))
-	if err != nil || !rel {
+	if err != nil {
+		o.drop("relevant.error", trigger)
 		return // a brain error reads as "not relevant"
 	}
+	if !rel {
+		return
+	}
+	// Detach the context: a debounced think outlives its triggering call.
+	// With RealClock and the Task 9 gateway, request-scoped contexts are
+	// canceled long before the timer fires — every think would then fail and
+	// read as silence. Values survive; cancellation does not propagate.
+	ctx = context.WithoutCancel(ctx)
 	if ve.cancel != nil {
 		ve.cancel()
 		ve.cancel = nil
@@ -370,9 +415,22 @@ func (o *Orchestrator) think(ctx context.Context, ve *voiceEntry, trigger protoc
 			return
 		}
 	}
+	// HOIST BOUNDARY (future async work): everything above the Think call
+	// re-validates after a lock reacquire — the generation counter covers
+	// supersession and the exchange gate above re-runs cheaply. Only the
+	// Think call itself is a candidate to move off the lock.
 	a, err := ve.brain.Think(ctx, o.view(ve, trigger))
-	if err != nil || !a.Speak {
-		return // errors and the zero value are silence
+	if err != nil {
+		o.drop("think.error", trigger)
+		return // errors are silence
+	}
+	if !a.Speak {
+		return // the zero value is silence
+	}
+	env := protocol.Envelope{
+		From: ve.charter.Voice, Serves: ve.charter.Serves, Scope: o.cfg.Scope,
+		To: a.To, Kind: a.Kind, Body: a.Body, Terms: a.Terms,
+		Exchange: trigger.Exchange, // replies inherit the trigger's exchange
 	}
 	// MANDATE GATE (law 4): a propose whose terms are missing or outside the
 	// charter dies here, silently — it never reaches the record. A settle is
@@ -380,18 +438,16 @@ func (o *Orchestrator) think(ctx context.Context, ve *voiceEntry, trigger protoc
 	// the lifecycle exclusively; a spoken settle would let a voice lie about
 	// state (law 6).
 	if a.Kind == protocol.KindSettle {
+		o.drop("settle.spoken", env)
 		return
 	}
 	if a.Kind == protocol.KindPropose {
 		if a.Terms == nil || !slices.Contains(ve.charter.Mandate.MayProposeTerms, a.Terms.Type) {
+			o.drop("mandate", env)
 			return
 		}
 	}
-	o.inject(ctx, protocol.Envelope{
-		From: ve.charter.Voice, Serves: ve.charter.Serves, Scope: o.cfg.Scope,
-		To: a.To, Kind: a.Kind, Body: a.Body, Terms: a.Terms,
-		Exchange: trigger.Exchange, // replies inherit the trigger's exchange
-	})
+	o.inject(ctx, env)
 }
 
 func union(from string, to []string) []string {

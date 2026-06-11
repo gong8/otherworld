@@ -9,6 +9,8 @@ import (
 )
 
 // VoiceView is everything a voice may consider on its turn.
+// Recent/Trigger share Terms and To backing with the record; treat as
+// read-only.
 type VoiceView struct {
 	Self    protocol.Charter
 	Scope   string
