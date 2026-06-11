@@ -21,5 +21,15 @@
       "additionalProperties": false,
       "properties": { "type": { "type": "string" }, "value": {} }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "settle" } }, "required": ["kind"] },
+      "then": { "required": ["terms"] }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "propose" } }, "required": ["kind"] },
+      "then": { "required": ["terms"] }
+    }
+  ]
 }

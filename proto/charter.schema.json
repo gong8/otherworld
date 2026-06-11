@@ -8,7 +8,7 @@
     "voice": { "type": "string", "pattern": "^voice:" },
     "serves": { "type": "string", "minLength": 1 },
     "kind": { "enum": ["person", "thing"] },
-    "interests": { "type": "string" },
+    "interests": { "type": "string", "minLength": 1 },
     "mandate": {
       "type": "object",
       "required": ["may_propose_terms", "may_settle_without_principal", "spend_limit_marks"],

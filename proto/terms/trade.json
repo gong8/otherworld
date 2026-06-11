@@ -8,8 +8,10 @@
     "value": {
       "type": "object",
       "required": ["give", "get", "price_marks", "buyer", "seller"],
+      "additionalProperties": false,
       "properties": {
-        "give": { "type": "string" }, "get": { "type": "string" },
+        "give": { "type": "string" },
+        "get": { "type": "string" },
         "price_marks": { "type": "integer", "minimum": 0 },
         "buyer": { "type": "string", "pattern": "^voice:" },
         "seller": { "type": "string", "pattern": "^voice:" }
