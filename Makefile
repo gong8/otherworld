@@ -1,4 +1,4 @@
-DB_URL=postgres://otherworld:otherworld@localhost:5433/fabric?sslmode=disable
+DB_URL=postgres://otherworld:otherworld@localhost:55432/fabric?sslmode=disable
 
 .PHONY: dev test test-db up sqlc
 

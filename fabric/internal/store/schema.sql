@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS settlements (
   parties     text[] NOT NULL,
   ts          timestamptz NOT NULL
 );
+CREATE INDEX IF NOT EXISTS settlements_scope_ts ON settlements (scope, ts DESC);
 
 -- law 7: the door forgets. rows past expires_at are purged.
 CREATE TABLE IF NOT EXISTS presence_events (
@@ -41,3 +42,4 @@ CREATE TABLE IF NOT EXISTS presence_events (
   ts         timestamptz NOT NULL,
   expires_at timestamptz NOT NULL
 );
+CREATE INDEX IF NOT EXISTS presence_events_expires_at ON presence_events (expires_at);
