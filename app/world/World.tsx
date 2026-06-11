@@ -175,7 +175,7 @@ export function World({ scope }: { scope: string }) {
     <div className="world-live">
       <p className="world-state micro">{stateText}</p>
 
-      <div className="overheard-label">
+      <div className="ruled-label">
         <div className="rule" />
         <span className="micro" id="overheard-label">
           overheard
