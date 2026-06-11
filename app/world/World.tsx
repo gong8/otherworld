@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useReducer, useRef } from "react";
 import {
   claim,
@@ -11,22 +12,23 @@ import {
 import {
   fullNotice,
   initialWorld,
-  settleLine,
+  scopeTitle,
   stateLineOf,
-  voiceName,
   worldReducer,
 } from "./reducer.mjs";
 
 type Line = ReturnType<typeof openLine>;
 
 /**
- * The séance: one feed, one input. All state lives in the pure reducer
+ * The chat: a conventional messaging screen where the other side of the
+ * thread is your agent at work. All state lives in the pure reducer
  * (reducer.mjs); this component only wires sockets, fetches, and the DOM.
  */
 export function World({ scope }: { scope: string }) {
   const [w, dispatch] = useReducer(worldReducer, scope, initialWorld);
   const lineRef = useRef<Line | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const threadRef = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
 
   // a claim survives refresh; a new tab is a new visitor (sessionStorage).
@@ -43,7 +45,8 @@ export function World({ scope }: { scope: string }) {
     }
   }, [scope]);
 
-  // the public feed, replayed from the beginning.
+  // the public feed, replayed from the beginning; the reducer filters it
+  // down to this agent's dealings.
   useEffect(
     () =>
       openFeed(scope, 0, {
@@ -82,7 +85,7 @@ export function World({ scope }: { scope: string }) {
     };
   }, [token, scope]);
 
-  // the state line: fetched on mount, refreshed after every settle frame.
+  // the status line: fetched on mount, refreshed after every settle frame.
   useEffect(() => {
     if (!w.stateStale) return;
     const ctrl = new AbortController();
@@ -101,25 +104,21 @@ export function World({ scope }: { scope: string }) {
 
   // autoscroll only when already at the foot — never fight a reading user.
   useEffect(() => {
+    const el = threadRef.current;
+    if (!el) return;
     const measure = () => {
       atBottom.current =
-        window.innerHeight + window.scrollY >=
-        document.documentElement.scrollHeight - 120;
+        el.scrollTop + el.clientHeight >= el.scrollHeight - 80;
     };
     measure();
-    window.addEventListener("scroll", measure, { passive: true });
-    window.addEventListener("resize", measure, { passive: true });
-    return () => {
-      window.removeEventListener("scroll", measure);
-      window.removeEventListener("resize", measure);
-    };
+    el.addEventListener("scroll", measure, { passive: true });
+    return () => el.removeEventListener("scroll", measure);
   }, []);
 
   useEffect(() => {
-    if (atBottom.current) {
-      window.scrollTo({ top: document.documentElement.scrollHeight });
-    }
-  }, [w.frames]);
+    const el = threadRef.current;
+    if (el && atBottom.current) el.scrollTop = el.scrollHeight;
+  }, [w.items]);
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -150,7 +149,7 @@ export function World({ scope }: { scope: string }) {
         text:
           err instanceof Error && err.message
             ? err.message
-            : "the line is not answering.",
+            : "the line is not answering",
       });
     }
   }
@@ -159,91 +158,141 @@ export function World({ scope }: { scope: string }) {
     dispatch({ type: "unprompt", exchange });
     if (w.claim) {
       consent(w.claim.token, exchange, approve).catch(() => {
-        // the record will show what actually settled
+        // the thread will show what actually settled
       });
     }
   }
 
-  const stateText = w.degraded
-    ? w.stateLine + " · the record is stalling"
+  const title = w.claim ? w.claim.name + "'s agent" : "your agent";
+  const statusText = w.degraded
+    ? w.stateLine + " · running behind"
     : w.stateLine;
   const placeholder = w.claim
-    ? "speak to yours"
-    : (w.claimError ?? "your name, to claim a voice");
+    ? "message your agent"
+    : (w.claimError ?? "your name to join");
+  const reconnecting =
+    w.feedOpen === false || (w.claim != null && w.lineOpen === false);
+
+  // sender labels show above the first bubble in a run
+  const labels = w.items.map((it) =>
+    it.kind === "agent" || it.kind === "consent"
+      ? "label" in it
+        ? it.label
+        : "your agent"
+      : it.kind === "other"
+        ? it.label
+        : null
+  );
 
   return (
-    <div className="world-live">
-      <p className="world-state micro">{stateText}</p>
+    <main className="chat">
+      <header className="chat-top">
+        <div className="chat-top-inner">
+          <div className="chat-title">
+            <h1>{title}</h1>
+            <p>{statusText}</p>
+          </div>
+          {scope === "scope:household" ? (
+            <Link className="chat-scope" href="/world?scope=street">
+              street
+            </Link>
+          ) : (
+            <Link className="chat-scope" href="/world">
+              household
+            </Link>
+          )}
+        </div>
+      </header>
 
-      <div className="ruled-label">
-        <div className="rule" />
-        <span className="micro" id="overheard-label">
-          overheard
-        </span>
-        <div className="rule" />
+      <div className="chat-thread" ref={threadRef}>
+        <div className="chat-thread-inner">
+          {!w.claim && w.items.length === 0 && (
+            <p className="chat-system chat-hint">
+              enter a name to join {scopeTitle(scope)}
+            </p>
+          )}
+
+          {w.items.map((it, i) => {
+            const label = labels[i];
+            const showLabel = label != null && label !== labels[i - 1];
+
+            if (it.kind === "system") {
+              return (
+                <p key={it.key} className="chat-system">
+                  {it.text}
+                </p>
+              );
+            }
+            if (it.kind === "mine") {
+              return (
+                <div key={it.key} className="chat-row mine">
+                  <div className="chat-bubble mine">{it.body}</div>
+                </div>
+              );
+            }
+            if (it.kind === "consent") {
+              return (
+                <div key={it.key} className="chat-row">
+                  {showLabel && <div className="chat-sender">{label}</div>}
+                  <div className="chat-bubble agent">{it.body}</div>
+                  {!it.answered && (
+                    <div className="chat-consent">
+                      <button
+                        type="button"
+                        onClick={() => answer(it.exchange, true)}
+                      >
+                        allow
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => answer(it.exchange, false)}
+                      >
+                        decline
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            }
+            return (
+              <div key={it.key} className="chat-row">
+                {showLabel && <div className="chat-sender">{label}</div>}
+                <div
+                  className={
+                    it.kind === "agent"
+                      ? "chat-bubble agent"
+                      : "chat-bubble other"
+                  }
+                >
+                  {it.body}
+                </div>
+              </div>
+            );
+          })}
+
+          {reconnecting && <p className="chat-system">reconnecting…</p>}
+        </div>
       </div>
 
-      <section className="world-feed world-col" aria-labelledby="overheard-label">
-        {w.frames.map((rec) =>
-          rec.env.kind === "settle" ? (
-            <div key={rec.seq} className="settle micro">
-              {settleLine(rec.env, rec.parties)}
-            </div>
+      <footer className="chat-compose">
+        <div className="chat-compose-inner">
+          {w.full ? (
+            <p className="chat-full">{fullNotice(scope)}</p>
           ) : (
-            <p key={rec.seq} className="line">
-              <span className="who">{voiceName(rec.env.from)}</span> —{" "}
-              {rec.env.body}
-            </p>
-          )
-        )}
-      </section>
-
-      {w.prompts.length > 0 && (
-        <div className="world-prompts world-col">
-          {w.prompts.map((p) => (
-            <div key={p.exchange} className="prompt">
-              <p className="line">
-                <span className="who">{voiceName(p.from)}</span> — {p.body}
-              </p>
-              <p className="consent micro">
-                <button type="button" onClick={() => answer(p.exchange, true)}>
-                  yes
-                </button>
-                {" · "}
-                <button type="button" onClick={() => answer(p.exchange, false)}>
-                  no
-                </button>
-              </p>
-            </div>
-          ))}
+            <form onSubmit={onSubmit}>
+              <input
+                ref={inputRef}
+                type="text"
+                autoComplete="off"
+                spellCheck={false}
+                enterKeyHint="send"
+                placeholder={placeholder}
+                aria-label={w.claim ? "message your agent" : "your name to join"}
+              />
+            </form>
+          )}
         </div>
-      )}
-
-      <footer className="world-foot world-col">
-        {w.feedOpen === false && (
-          <p className="world-quiet micro">the line is quiet. reconnecting…</p>
-        )}
-        {w.claim != null && w.lineOpen === false && (
-          <p className="world-quiet micro">your line is quiet. reconnecting…</p>
-        )}
-        {w.full ? (
-          <p className="micro world-full">{fullNotice(scope)}</p>
-        ) : (
-          <form onSubmit={onSubmit}>
-            <input
-              ref={inputRef}
-              className="speak-line"
-              type="text"
-              autoComplete="off"
-              spellCheck={false}
-              placeholder={placeholder}
-              aria-label={
-                w.claim ? "speak to yours" : "your name, to claim a voice"
-              }
-            />
-          </form>
-        )}
       </footer>
-    </div>
+    </main>
   );
 }
