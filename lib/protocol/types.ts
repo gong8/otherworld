@@ -1,8 +1,6 @@
 // generated from proto/ — do not edit; npm run gen:protocol
 
-export type OtherworldEnvelope = {
-  [k: string]: unknown;
-} & {
+export interface Envelope {
   v: 0;
   id: string;
   ts: string;
@@ -17,9 +15,9 @@ export type OtherworldEnvelope = {
     type: string;
     value: unknown;
   };
-};
+}
 
-export interface OtherworldCharter {
+export interface Charter {
   voice: string;
   serves: string;
   kind: "person" | "thing";
@@ -30,7 +28,3 @@ export interface OtherworldCharter {
     spend_limit_marks: number;
   };
 }
-
-// Clean aliases
-export type Envelope = OtherworldEnvelope;
-export type Charter = OtherworldCharter;
