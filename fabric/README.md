@@ -21,6 +21,9 @@ make up   # start compose postgres on :55432
 make dev  # fabricd on :8080 with fake brains
 ```
 
+real brains: `make dev-real` (see [real brains](#real-brains) — bedrock model
+access required).
+
 watch the household feed:
 
 ```sh
@@ -54,6 +57,48 @@ the settlement lands on the feed and in the state view:
 ```sh
 curl 'http://localhost:8080/v0/state?scope=scope:household'
 ```
+
+## real brains
+
+`make dev-real` runs the same world on Claude models over Amazon Bedrock
+(`-brains bedrock`), with the default debounce — real pacing, thinks take
+seconds. fake brains remain the default everywhere else (`make dev`, all of CI).
+
+**prerequisite: model access.** AWS credentials resolving via the default
+chain are not enough — Anthropic model access must be enabled per account, per
+region, in the console: AWS console → Amazon Bedrock → *Model access* →
+*Modify model access* → request the Anthropic Claude models (Haiku 4.5 and
+Sonnet 4.6) → submit. Access is usually granted within minutes. Until then the
+boot preflight (one tiny Haiku call) refuses with the exact message naming this
+page; nothing is wiped, nothing serves.
+
+**region note.** the region resolves from `AWS_REGION` / `AWS_DEFAULT_REGION`,
+defaulting to `us-east-1`. observed at the time of writing: the bare
+`anthropic.claude-sonnet-4-6` model id returned **404 not_found in
+us-east-1** — some models are served only through cross-region inference
+profiles or in other regions. if the preflight passes (Haiku) but person
+thinks drop as `think.error`, override the person model, e.g.
+`OW_PERSON_MODEL=us.anthropic.claude-sonnet-4-6` (the `us.` inference-profile
+prefix) or pick a region that serves it. `OW_GATE_MODEL` and `OW_THINK_MODEL`
+override the same way; defaults live in `internal/brain/bedrock`.
+
+**the cost story.** the relevance gate is heuristics — free, no model call —
+and kills most triggers at the source (unaddressed chatter, post-settle
+ping-pong). what survives thinks on Haiku for terms-free thing turns and on
+Sonnet for person-voices and anything carrying terms, so spend is
+Sonnet-dominant. `-budget-tokens-per-hour` (default 500k) is the tripwire:
+priced at Sonnet rates that bounds the hour at ~$1.50 all-input to ~$7.50
+all-output, and real traffic — transcript windows in, two sentences out —
+sits near the input end, call it **≲$2/hour**. past the cap the world *rests*
+(thinks become silence, `/v0/state` shows `"resting": true`, the chat says so)
+rather than overspends, and wakes the next hour.
+
+**credentials hygiene.** the adapter uses the default AWS chain, which happily
+picks up root-account keys from `~/.aws/credentials`. fine for a local demo;
+before any public deploy, mint an IAM user (or role) whose policy allows
+`bedrock:InvokeModel` on the Anthropic model/inference-profile ARNs and
+nothing else, and run fabricd with that. the world should not hold keys that
+can do more than think.
 
 ## routes
 
@@ -106,7 +151,6 @@ curl 'http://localhost:8080/v0/state?scope=scope:household'
 
 ## what is not here yet
 
-- **bedrock brains** — `brain.Brain` is the seam; the `fake` adapter ships; the Bedrock (Claude) adapter arrives in Plan 3
-- **deploy** — Fargate + ALB + RDS via CDK; Plan 4; `make dev` covers local
+- **deploy** — Fargate + ALB + RDS via CDK; Plan 4; `make dev` / `make dev-real` cover local
 - **runtime package** — `fabric/internal/runtime` is built and tested but deliberately NOT wired: it hosts async voice loops for slow LLM brains; not needed while fake brains run under the orchestrator lock
 - **federation, real money, real devices** — v2 doors, all left open in the protocol

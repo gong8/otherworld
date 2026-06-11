@@ -22,9 +22,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	mrand "math/rand/v2"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -32,10 +34,12 @@ import (
 	"time"
 
 	"otherworld/fabric/internal/brain"
+	"otherworld/fabric/internal/brain/bedrock"
 	"otherworld/fabric/internal/budget"
 	"otherworld/fabric/internal/gateway"
 	"otherworld/fabric/internal/orchestrator"
 	"otherworld/fabric/internal/protocol"
+	"otherworld/fabric/internal/protocol/termschema"
 	"otherworld/fabric/internal/scenes"
 	"otherworld/fabric/internal/store"
 	"otherworld/fabric/internal/world"
@@ -105,12 +109,21 @@ type server struct {
 	gw     *gateway.Gateway
 	scopes map[string]*scopeState
 	// meter is the world's token budget, wrapped so rest transitions log
-	// exactly once. Constructed only for -brains bedrock; B5 hands it to the
+	// exactly once. Constructed only for -brains bedrock and handed to the
 	// adapter as its Meter. nil with fake brains — they cost nothing.
 	meter *restLogger
 	// resting reports the world's rest state for stateView. nil (fake
 	// brains) reads as false: a free world never rests.
 	resting func() bool
+	// brains is the ONE shared bedrock adapter when -brains bedrock; nil
+	// means fake brains. Sharing one instance across every voice is safe by
+	// design: the adapter is stateless per voice (VoiceView carries the
+	// charter) and sharing keeps the prompt cache and the meter coherent.
+	brains brain.Brain
+	// terms is the compiled proto/terms registry every orchestrator gates
+	// payloads against. Required for bedrock (model output is untrusted);
+	// nil only when fake brains boot without a proto/terms dir in reach.
+	terms *termschema.Registry
 	// runID namespaces per-boot identifiers: the orchestrator numbers
 	// utterances from 1 each boot, but utterances.id is UNIQUE across boots —
 	// the transcript accumulates; only the world is fresh.
@@ -148,10 +161,63 @@ type server struct {
 	storeFails map[string]int
 }
 
-// newServer composes the world: store, two orchestrators (household, street),
-// gateway, seeds, and the background loops. ctx bounds everything but the
-// writers, which drain on close() so accepted utterances reach the store.
+// newServer composes the world: brains (with the bedrock preflight), the
+// terms registry, store, two orchestrators (household, street), gateway,
+// seeds, and the background loops. ctx bounds everything but the writers,
+// which drain on close() so accepted utterances reach the store.
 func newServer(ctx context.Context, cfg config) (*server, error) {
+	// Brains before the store: a failed bedrock preflight must refuse the
+	// boot BEFORE -fresh wipes the record.
+	var (
+		meter   *restLogger
+		resting func() bool
+		brains  brain.Brain
+	)
+	if cfg.brains == "bedrock" {
+		m := budget.New(cfg.budgetTokensPerHour)
+		meter = &restLogger{m: m}
+		resting = m.Resting
+		// Region stays empty: the adapter resolves AWS_REGION /
+		// AWS_DEFAULT_REGION, then us-east-1 — the standard AWS chain. Model
+		// env overrides fall back to the adapter defaults when unset.
+		b, err := bedrock.New(bedrock.Config{
+			GateModel:   os.Getenv("OW_GATE_MODEL"),
+			ThinkModel:  os.Getenv("OW_THINK_MODEL"),
+			PersonModel: os.Getenv("OW_PERSON_MODEL"),
+			Meter:       meter,
+			OnUsage: func(model string, in, out, cacheRead int) {
+				slog.Debug("bedrock think", "model", model,
+					"in", in, "out", out, "cache_read", cacheRead)
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		model, latency, err := b.Preflight(ctx)
+		if err != nil {
+			return nil, err
+		}
+		slog.Info("bedrock preflight ok", "model", model, "latency", latency.Round(time.Millisecond))
+		brains = b
+	}
+
+	// The terms registry guards the record against off-schema payloads
+	// (law 6). REQUIRED for bedrock — model output is untrusted; with fake
+	// brains a missing proto/terms dir only warns (fakes are well-behaved,
+	// and unit-style boots keep working), but a dir that fails to COMPILE is
+	// fatal either way: that is a repo bug, not an environment.
+	var terms *termschema.Registry
+	if dir, derr := findTermsDir(); derr == nil {
+		var lerr error
+		if terms, lerr = termschema.Load(dir); lerr != nil {
+			return nil, fmt.Errorf("termschema: %w", lerr)
+		}
+	} else if cfg.brains == "bedrock" {
+		return nil, fmt.Errorf("termschema (required for bedrock): %w", derr)
+	} else {
+		slog.Warn("terms registry not found; payload validation disabled", "err", derr)
+	}
+
 	st, err := store.Open(ctx, cfg.databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("store: %w", err)
@@ -172,6 +238,10 @@ func newServer(ctx context.Context, cfg config) (*server, error) {
 		cfg:        cfg,
 		store:      st,
 		scopes:     map[string]*scopeState{},
+		meter:      meter,
+		resting:    resting,
+		brains:     brains,
+		terms:      terms,
 		runID:      hex.EncodeToString(nonce[:]),
 		ctx:        ctx,
 		stop:       make(chan struct{}),
@@ -180,11 +250,6 @@ func newServer(ctx context.Context, cfg config) (*server, error) {
 		exchanges:  map[string]exchangeInfo{},
 		marks:      map[string]map[string]int{},
 		storeFails: map[string]int{},
-	}
-	if cfg.brains == "bedrock" {
-		m := budget.New(cfg.budgetTokensPerHour)
-		s.meter = &restLogger{m: m}
-		s.resting = m.Resting
 	}
 	s.gw = gateway.New(gateway.Config{
 		OnPrincipalSay: s.onPrincipalSay,
@@ -216,6 +281,32 @@ func newServer(ctx context.Context, cfg config) (*server, error) {
 	return s, nil
 }
 
+// findTermsDir locates the proto/terms schema directory. OW_TERMS_DIR
+// overrides; otherwise probe upward from the working directory — `make dev`
+// runs from fabric/ (../proto/terms), `go test ./cmd/fabricd` from the
+// package dir (../../../proto/terms).
+func findTermsDir() (string, error) {
+	if dir := os.Getenv("OW_TERMS_DIR"); dir != "" {
+		return dir, nil
+	}
+	for _, dir := range []string{"proto/terms", "../proto/terms", "../../proto/terms", "../../../proto/terms"} {
+		if st, err := os.Stat(dir); err == nil && st.IsDir() {
+			return dir, nil
+		}
+	}
+	return "", errors.New("proto/terms not found upward of the working directory; set OW_TERMS_DIR")
+}
+
+// brainFor picks a voice's brain: the ONE shared bedrock adapter when -brains
+// bedrock (stateless per voice — the VoiceView carries the charter; rules are
+// the fake's script and mean nothing to a model), else a fake driven by rules.
+func (s *server) brainFor(rules []brain.Rule) brain.Brain {
+	if s.brains != nil {
+		return s.brains
+	}
+	return brain.NewFake(rules)
+}
+
 // addScope builds one scope: a World, an orchestrator over it, and the seeds.
 // Every seed is credited 0 marks (the ledger knows it; the corner shop
 // accumulates from there) and upserted into the voices table.
@@ -235,6 +326,13 @@ func (s *server) addScope(ctx context.Context, scope string, seeds []scenes.Seed
 		DebounceMax: s.cfg.debounceMax,
 		Scope:       scope,
 		RunID:       s.runID,
+		// Terms gates every propose/accept payload against proto/terms —
+		// required armor for bedrock, harmless for fakes. ThinkTimeout keeps
+		// its 30s default: generous for a Sonnet think, finite for a hang.
+		Terms: s.terms,
+		// BaseContext is the server's root context: shutdown cancels
+		// in-flight thinks (Bedrock requests included) mid-call.
+		BaseContext: s.ctx,
 		// Append runs under the orchestrator mutex: enqueue only, never
 		// block. A full queue drops the envelope — loudly; the writer
 		// goroutine owns persist-then-broadcast order.
@@ -252,7 +350,7 @@ func (s *server) addScope(ctx context.Context, scope string, seeds []scenes.Seed
 	})
 	s.marks[scope] = map[string]int{}
 	for _, seed := range seeds {
-		sc.orch.AddVoice(ctx, seed.Charter, brain.NewFake(seed.Rules), seed.State)
+		sc.orch.AddVoice(ctx, seed.Charter, s.brainFor(seed.Rules), seed.State)
 		sc.orch.Credit(seed.Charter.Voice, 0)
 		s.marks[scope][seed.Charter.Voice] = 0
 		sc.serves[seed.Charter.Voice] = seed.Charter.Serves
@@ -421,7 +519,7 @@ func (s *server) onClaim(scope, name string) (string, error) {
 	s.mu.Unlock()
 
 	charter := scenes.ResidentCharter(voice, name)
-	sc.orch.AddVoice(s.ctx, charter, brain.NewFake(scenes.ResidentAgentRules()), nil)
+	sc.orch.AddVoice(s.ctx, charter, s.brainFor(scenes.ResidentAgentRules()), nil)
 	sc.orch.Credit(voice, 100)
 
 	// Store failures here are logged, not fatal: the claim is live in-memory

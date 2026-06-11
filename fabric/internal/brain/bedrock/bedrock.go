@@ -28,6 +28,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	awsbedrock "github.com/anthropics/anthropic-sdk-go/bedrock"
@@ -115,6 +116,32 @@ func New(cfg Config) (*Bedrock, error) {
 		return nil, fmt.Errorf("bedrock: %w", err)
 	}
 	return &Bedrock{cfg: cfg, client: client}, nil
+}
+
+// Preflight proves model access with ONE tiny real call: GateModel (Haiku),
+// max_tokens 16, "say ok". fabricd runs it once at boot with -brains bedrock —
+// a clear refusal at the door beats a silently mute world at first think. It
+// is deliberately unmetered: it runs before the world does, and 16 tokens is
+// noise. On failure the error names the console fix, because a 403/404 here
+// almost always means anthropic model access is not enabled for this aws
+// account in this region. Returns the model proved and the call latency.
+func (b *Bedrock) Preflight(ctx context.Context) (model string, latency time.Duration, err error) {
+	start := time.Now()
+	_, err = b.client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     anthropic.Model(b.cfg.GateModel),
+		MaxTokens: 16,
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock("say ok")),
+		},
+	})
+	if err != nil {
+		return b.cfg.GateModel, 0, fmt.Errorf(
+			"bedrock preflight failed: %v — a 403 permission_error or 404 not_found_error here means "+
+				"anthropic model access is not enabled for this aws account: open the aws bedrock console, "+
+				"model access page (mind the region), request access to the anthropic claude models "+
+				"(%s, %s), then rerun", err, b.cfg.GateModel, b.cfg.PersonModel)
+	}
+	return b.cfg.GateModel, time.Since(start), nil
 }
 
 // Relevant is the cheap gate, called under the orchestrator lock: pure

@@ -93,12 +93,10 @@ func main() {
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
-	if *brains != "fake" {
-		if *brains == "bedrock" {
-			slog.Error("bedrock brains arrive in plan 3")
-		} else {
-			slog.Error("unknown -brains adapter", "brains", *brains)
-		}
+	switch *brains {
+	case "fake", "bedrock":
+	default:
+		slog.Error("unknown -brains adapter", "brains", *brains)
 		os.Exit(1)
 	}
 	databaseURL := os.Getenv("DATABASE_URL")

@@ -1,9 +1,15 @@
 DB_URL=postgres://otherworld:otherworld@localhost:55432/fabric?sslmode=disable
 
-.PHONY: dev test test-db golden up sqlc
+.PHONY: dev dev-real test test-db golden up sqlc
 
 dev: ## run the world locally with fake brains
 	cd fabric && DATABASE_URL=$(DB_URL) go run ./cmd/fabricd -brains fake -addr :8080 -fresh
+
+# dev-real keeps the default debounce (real pacing — thinks take seconds) and
+# requires anthropic model access enabled in the aws bedrock console; the boot
+# preflight refuses clearly if it is not. See fabric/README.md "real brains".
+dev-real: ## run the world locally with real bedrock brains (still -fresh)
+	cd fabric && DATABASE_URL=$(DB_URL) go run ./cmd/fabricd -brains bedrock -addr :8080 -fresh
 
 test: ## unit tests (no db)
 	cd fabric && go test ./... -short

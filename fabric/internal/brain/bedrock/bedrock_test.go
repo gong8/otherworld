@@ -441,6 +441,57 @@ func TestToActionStripsTermsOffNonCarryingKinds(t *testing.T) {
 	}
 }
 
+// Preflight makes exactly one tiny GateModel call — max_tokens 16, "say ok" —
+// and reports the model it proved access for.
+func TestPreflightSuccess(t *testing.T) {
+	var captured map[string]any
+	b := newAdapter(t, Config{}, func(req *http.Request) (*http.Response, error) {
+		raw, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(raw, &captured); err != nil {
+			return nil, err
+		}
+		return jsonResponse(200, messageBody(t, "ok", "end_turn", defaultUsage())), nil
+	})
+	model, latency, err := b.Preflight(t.Context())
+	if err != nil {
+		t.Fatalf("Preflight: %v", err)
+	}
+	if model != DefaultGateModel {
+		t.Fatalf("model = %q, want %q", model, DefaultGateModel)
+	}
+	if latency <= 0 {
+		t.Fatalf("latency = %v, want > 0", latency)
+	}
+	if got := captured["model"]; got != DefaultGateModel {
+		t.Fatalf("request model = %v, want the gate model", got)
+	}
+	if got := captured["max_tokens"]; got != float64(16) {
+		t.Fatalf("max_tokens = %v, want 16 (a preflight is tiny)", got)
+	}
+}
+
+// A failing preflight names the console fix: the error must carry the
+// model-access wording so the operator knows exactly what to enable.
+func TestPreflightFailureNamesTheConsoleFix(t *testing.T) {
+	b := newAdapter(t, Config{}, func(*http.Request) (*http.Response, error) {
+		return jsonResponse(403,
+			[]byte(`{"type":"error","error":{"type":"permission_error","message":"model access denied"}}`),
+			"x-should-retry", "false"), nil
+	})
+	_, _, err := b.Preflight(t.Context())
+	if err == nil {
+		t.Fatal("a 403 preflight must error")
+	}
+	for _, want := range []string{"model access", "aws bedrock console", DefaultPersonModel} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("preflight error must name %q, got: %v", want, err)
+		}
+	}
+}
+
 // fakeMeter records Add calls and answers Allow from a flag.
 type fakeMeter struct {
 	allow bool
