@@ -1,0 +1,5 @@
+fabric/
+proto/
+infra/
+docker-compose.yml
+Makefile
