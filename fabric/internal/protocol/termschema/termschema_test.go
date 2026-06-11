@@ -2,6 +2,9 @@ package termschema_test
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"otherworld/fabric/internal/protocol"
@@ -111,5 +114,32 @@ func TestUnknownTypeRejected(t *testing.T) {
 func TestLoadMissingDirErrors(t *testing.T) {
 	if _, err := termschema.Load("/nonexistent/path/to/terms"); err == nil {
 		t.Fatal("Load on missing directory must return an error")
+	}
+}
+
+// Load on a directory containing a malformed schema → error naming the file.
+func TestLoadMalformedSchemaErrors(t *testing.T) {
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "broken.set.json")
+	if err := os.WriteFile(bad, []byte(`{invalid`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := termschema.Load(dir)
+	if err == nil {
+		t.Fatal("Load on a malformed schema must return an error")
+	}
+	if !strings.Contains(err.Error(), bad) {
+		t.Fatalf("Load error must name the offending file %q, got: %v", bad, err)
+	}
+}
+
+// curtains.set: "closed" is in the enum → valid; "ajar" is not → invalid.
+func TestCurtainsSetValidAndInvalid(t *testing.T) {
+	r := mustLoad(t)
+	if err := r.Validate(terms("curtains.set", "closed")); err != nil {
+		t.Fatalf("curtains.set \"closed\" must be valid: %v", err)
+	}
+	if err := r.Validate(terms("curtains.set", "ajar")); err == nil {
+		t.Fatal("curtains.set \"ajar\" must be invalid (not in enum)")
 	}
 }
