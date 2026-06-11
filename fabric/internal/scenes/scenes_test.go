@@ -224,6 +224,95 @@ func TestResidentColdProposesHeat(t *testing.T) {
 	}
 }
 
+func TestResidentHotProposesCooler(t *testing.T) {
+	rules := scenes.ResidentAgentRules()
+	residentCharter := scenes.ResidentCharter("voice:her-agent", "her")
+
+	for _, body := range []string{"it's hot in here.", "too warm tonight."} {
+		v := brain.VoiceView{
+			Self: residentCharter,
+			Trigger: protocol.Envelope{
+				From: "voice:principal:her",
+				Kind: protocol.KindSay,
+				Body: body,
+			},
+		}
+		a, matched := runRules(rules, v)
+		if !matched {
+			t.Fatalf("hot rule should match %q", body)
+		}
+		if !a.Speak {
+			t.Fatalf("Speak must be true for %q", body)
+		}
+		if a.Kind != protocol.KindPropose {
+			t.Fatalf("expected propose for %q, got %q", body, a.Kind)
+		}
+		if len(a.To) == 0 || a.To[0] != "voice:heating" {
+			t.Fatalf("expected To=[voice:heating] for %q, got %v", body, a.To)
+		}
+		if a.Body != "too warm now. one degree down, please." {
+			t.Fatalf("unexpected body for %q: %q", body, a.Body)
+		}
+		if a.Terms == nil || a.Terms.Type != "temperature.set" {
+			t.Fatalf("expected temperature.set terms for %q, got %+v", body, a.Terms)
+		}
+		var val float64
+		if err := json.Unmarshal(a.Terms.Value, &val); err != nil {
+			t.Fatalf("cannot unmarshal temperature value for %q: %v", body, err)
+		}
+		if val != 20.5 {
+			t.Fatalf("expected 20.5 for %q, got %v", body, val)
+		}
+		// mandate check
+		if !contains(residentCharter.Mandate.MayProposeTerms, a.Terms.Type) {
+			t.Fatalf("terms type %q not in resident's MayProposeTerms", a.Terms.Type)
+		}
+	}
+}
+
+func TestResidentDarkAsksForLight(t *testing.T) {
+	rules := scenes.ResidentAgentRules()
+	residentCharter := scenes.ResidentCharter("voice:her-agent", "her")
+	v := brain.VoiceView{
+		Self: residentCharter,
+		Trigger: protocol.Envelope{
+			From: "voice:principal:her",
+			Kind: protocol.KindSay,
+			Body: "it's getting dark.",
+		},
+	}
+	a, matched := runRules(rules, v)
+	if !matched {
+		t.Fatal("dark rule should match")
+	}
+	if !a.Speak {
+		t.Fatal("Speak must be true")
+	}
+	if a.Kind != protocol.KindPropose {
+		t.Fatalf("expected propose, got %q", a.Kind)
+	}
+	if len(a.To) == 0 || a.To[0] != "voice:lamp" {
+		t.Fatalf("expected To=[voice:lamp], got %v", a.To)
+	}
+	if a.Body != "some light, please." {
+		t.Fatalf("unexpected body: %q", a.Body)
+	}
+	if a.Terms == nil || a.Terms.Type != "lamp.set" {
+		t.Fatalf("expected lamp.set terms, got %+v", a.Terms)
+	}
+	var val string
+	if err := json.Unmarshal(a.Terms.Value, &val); err != nil {
+		t.Fatalf("cannot unmarshal lamp value: %v", err)
+	}
+	if val != "on" {
+		t.Fatalf("expected lamp value \"on\", got %q", val)
+	}
+	// mandate check
+	if !contains(residentCharter.Mandate.MayProposeTerms, a.Terms.Type) {
+		t.Fatalf("terms type %q not in resident's MayProposeTerms", a.Terms.Type)
+	}
+}
+
 func TestResidentSweetHails(t *testing.T) {
 	rules := scenes.ResidentAgentRules()
 	residentCharter := scenes.ResidentCharter("voice:her-agent", "her")
