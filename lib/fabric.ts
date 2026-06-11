@@ -29,10 +29,11 @@ export type FeedHandler = {
 /**
  * openFeed — auto-reconnecting public feed socket.
  *
- * Replays from `after` on first connect; on reconnect the cursor advances to
- * the last seen seq so the gateway replays only the gap. Backoff starts at 1 s
- * and doubles up to 8 s. Returns a close() function; calling it prevents all
- * future reconnects.
+ * `after`: 0 = replay from the beginning; pass the last seen seq for
+ * gap-replay only. On reconnect the cursor advances to the last seen seq so
+ * the gateway replays only the gap. Backoff starts at 1 s and doubles up to
+ * 8 s. Returns a close() function: it prevents all future reconnects, cancels
+ * any pending backoff timer, and closes the live socket.
  */
 export function openFeed(
   scope: string,
@@ -44,12 +45,14 @@ export function openFeed(
   let closed = false;
   let cursor = after;
   let delay = 0; // _backoff(0) → 1000 on first failure
+  let ws: WebSocket | null = null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
 
   function connect() {
     if (closed) return;
 
     const url = `${wsBase}/v0/feed?scope=${encodeURIComponent(scope)}&after=${cursor}`;
-    const ws = new WebSocket(url);
+    ws = new WebSocket(url);
 
     ws.onopen = () => {
       delay = 0; // reset backoff on successful open
@@ -70,7 +73,7 @@ export function openFeed(
       h.onStatus("closed");
       if (!closed) {
         delay = _backoff(delay) as number;
-        setTimeout(connect, delay);
+        timer = setTimeout(connect, delay);
       }
     };
 
@@ -83,14 +86,16 @@ export function openFeed(
 
   return () => {
     closed = true;
+    clearTimeout(timer);
+    ws?.close();
   };
 }
 
 // ─── Claim ─────────────────────────────────────────────────────────────────
 
 /**
- * claim — POST /v0/claim. On failure throws an Error whose message is the
- * plain-text response body (the page shows this verbatim to the user).
+ * claim — POST /v0/claim. Throws Error(server text) on !ok (the page shows
+ * the plain-text body verbatim); rejects with TypeError on network failure.
  */
 export async function claim(
   scope: string,
@@ -108,40 +113,80 @@ export async function claim(
 // ─── Line ──────────────────────────────────────────────────────────────────
 
 /**
- * openLine — token-gated private line.
+ * openLine — token-gated private line, auto-reconnecting like openFeed
+ * (1 s → 8 s capped backoff), so a dropped line never leaves the principal
+ * silently deaf. There is no replay cursor: the gateway streams
+ * principal-addressed envelopes live only, so prompts simply resume after a
+ * reconnect.
  *
  * RECEIVE: Frame JSON; only `ask_principal` envelopes reach onPrompt (other
  * principal-addressed envelopes are already visible on the public feed).
- * SEND: plain text spoken as the principal; no-ops unless the socket is OPEN.
+ * SEND: plain text spoken as the principal; no-ops unless the socket is OPEN
+ * (including during a reconnect window).
+ * onStatus (optional): "open"/"closed" per socket, e.g. for a "the line is
+ * quiet" indicator.
+ * close(): prevents all future reconnects, cancels any pending backoff timer,
+ * and closes the live socket.
  */
 export function openLine(
   token: string,
-  onPrompt: (env: Envelope) => void
+  onPrompt: (env: Envelope) => void,
+  onStatus?: (s: "open" | "closed") => void
 ): { send: (text: string) => void; close: () => void } {
   if (typeof window === "undefined") throw new Error("browser only");
 
-  const url = `${wsBase}/v0/line?token=${encodeURIComponent(token)}`;
-  const ws = new WebSocket(url);
+  let closed = false;
+  let delay = 0; // _backoff(0) → 1000 on first failure
+  let ws: WebSocket | null = null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
 
-  ws.onmessage = (ev) => {
-    try {
-      const f: Frame = JSON.parse(ev.data as string);
-      if (f.env.kind === "ask_principal") {
-        onPrompt(f.env);
+  function connect() {
+    if (closed) return;
+
+    const url = `${wsBase}/v0/line?token=${encodeURIComponent(token)}`;
+    ws = new WebSocket(url);
+
+    ws.onopen = () => {
+      delay = 0; // reset backoff on successful open
+      onStatus?.("open");
+    };
+
+    ws.onmessage = (ev) => {
+      try {
+        const f: Frame = JSON.parse(ev.data as string);
+        if (f.env.kind === "ask_principal") {
+          onPrompt(f.env);
+        }
+      } catch {
+        // drop malformed frames silently
       }
-    } catch {
-      // drop malformed frames silently
-    }
-  };
+    };
+
+    ws.onclose = () => {
+      onStatus?.("closed");
+      if (!closed) {
+        delay = _backoff(delay) as number;
+        timer = setTimeout(connect, delay);
+      }
+    };
+
+    ws.onerror = () => {
+      // onclose fires after onerror; let it handle reconnect
+    };
+  }
+
+  connect();
 
   return {
     send(text: string) {
-      if (ws.readyState === WebSocket.OPEN) {
+      if (ws?.readyState === WebSocket.OPEN) {
         ws.send(text);
       }
     },
     close() {
-      ws.close();
+      closed = true;
+      clearTimeout(timer);
+      ws?.close();
     },
   };
 }
@@ -149,8 +194,9 @@ export function openLine(
 // ─── Consent ───────────────────────────────────────────────────────────────
 
 /**
- * consent — POST /v0/consent. Throws on !ok so the UI can re-surface the
- * prompt when the server rejects (e.g. unknown token, already resolved).
+ * consent — POST /v0/consent. Throws Error(server text) on !ok so the UI can
+ * re-surface the prompt when the server rejects (e.g. unknown token, already
+ * resolved); rejects with TypeError on network failure.
  */
 export async function consent(
   token: string,
@@ -168,8 +214,8 @@ export async function consent(
 // ─── State ─────────────────────────────────────────────────────────────────
 
 /**
- * state — GET /v0/state. Returns the scope's world-state object; throws on
- * !ok.
+ * state — GET /v0/state. Returns the scope's world-state object. Throws
+ * Error(server text) on !ok; rejects with TypeError on network failure.
  */
 export async function state(scope: string): Promise<Record<string, unknown>> {
   const r = await fetch(
