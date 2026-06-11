@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "otherworld:terms:lamp.set",
+  "type": "object",
+  "required": ["type", "value"],
+  "properties": {
+    "type": { "const": "lamp.set" },
+    "value": { "enum": ["on", "off", "dim"] }
+  }
+}
