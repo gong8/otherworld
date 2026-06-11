@@ -128,3 +128,87 @@ func TestCounterOfferSettlesOnLatestTerms(t *testing.T) {
 		t.Fatal("the counter-offer's terms must hit world state")
 	}
 }
+
+// Settles are synthesis-only (law 6): a brain action with Kind==settle is
+// dropped at the gate even when its terms sit inside the mandate — a spoken
+// settle would let a voice lie about state.
+func TestSpokenSettleNeverReachesRecord(t *testing.T) {
+	o, clock, log := harness(t)
+	ctx := context.Background()
+	liar := charter("voice:liar", "the household", protocol.VoiceThing, []string{"temperature.set"}, true)
+	o.AddVoice(ctx, liar, brain.NewFake([]brain.Rule{{
+		Match: func(v brain.VoiceView) bool { return true },
+		Respond: func(v brain.VoiceView) brain.Action {
+			return brain.Action{Speak: true, Kind: protocol.KindSettle,
+				Body:  "it is done.",
+				Terms: &protocol.Terms{Type: "temperature.set", Value: []byte(`30`)}} // in mandate, dropped anyway
+		},
+	}}), map[string]any{"temperature": 21.0})
+
+	o.PrincipalSays(ctx, "voice:liar", "make it warmer")
+	clock.Advance(10 * time.Second)
+
+	for _, e := range *log {
+		if e.Kind == protocol.KindSettle {
+			t.Fatal("a spoken settle must never reach the record")
+		}
+	}
+	if o.WorldView("voice:liar")["temperature"] != 21.0 {
+		t.Fatal("a spoken settle must not change world state")
+	}
+}
+
+// An external settle envelope dies at Inject: no Append, no routing, no
+// world change. Settles exist only via the internal accept→synthesis path.
+func TestInjectedSettleDropped(t *testing.T) {
+	o, clock, log := harness(t)
+	ctx := context.Background()
+	thing := charter("voice:heating", "the household", protocol.VoiceThing, []string{"temperature.set"}, true)
+	o.AddVoice(ctx, thing, brain.NewFake(nil), map[string]any{"temperature": 21.0})
+
+	o.Inject(ctx, protocol.Envelope{
+		From: "voice:intruder", Serves: "nobody", Scope: o.ScopeID(),
+		Kind: protocol.KindSettle, To: []string{"voice:heating"},
+		Terms: &protocol.Terms{Type: "temperature.set", Value: []byte(`30`)},
+	})
+	clock.Advance(10 * time.Second)
+
+	if len(*log) != 0 {
+		t.Fatalf("an injected settle must be dropped before the record, got %s", kinds(*log))
+	}
+	if o.WorldView("voice:heating")["temperature"] != 21.0 {
+		t.Fatal("an injected settle must not change world state")
+	}
+}
+
+// Re-claiming a resident slot cancels the old brain's pending think: the
+// stale charter/brain must never fire after AddVoice replaces it.
+func TestReAddVoiceCancelsPendingThink(t *testing.T) {
+	o, clock, log := harness(t)
+	ctx := context.Background()
+	ch := charter("voice:resident", "the household", protocol.VoiceThing, []string{"temperature.set"}, true)
+	oldBrain := brain.NewFake([]brain.Rule{{
+		Match: func(v brain.VoiceView) bool { return true },
+		Respond: func(v brain.VoiceView) brain.Action {
+			return brain.Action{Speak: true, Kind: protocol.KindPropose, To: []string{v.Trigger.From},
+				Body:  "old resident speaking",
+				Terms: &protocol.Terms{Type: "temperature.set", Value: []byte(`30`)}}
+		},
+	}})
+	o.AddVoice(ctx, ch, oldBrain, map[string]any{"temperature": 21.0})
+
+	o.PrincipalSays(ctx, "voice:resident", "hello") // schedules the OLD brain's think
+	// Re-claim the slot inside the debounce window with a brain that never
+	// speaks; the stale timer must be cancelled.
+	o.AddVoice(ctx, ch, brain.NewFake(nil), nil)
+	clock.Advance(10 * time.Second)
+
+	for _, e := range *log {
+		if e.Kind == protocol.KindPropose {
+			t.Fatal("re-adding a voice must cancel its pending think; the old brain spoke")
+		}
+	}
+	if got := kinds(*log); got != "say" {
+		t.Fatalf("only the principal's say belongs in the record, got %s", got)
+	}
+}

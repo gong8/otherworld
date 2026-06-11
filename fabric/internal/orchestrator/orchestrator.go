@@ -110,7 +110,16 @@ func (o *Orchestrator) AddVoice(ctx context.Context, ch protocol.Charter, b brai
 	_ = ctx
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if _, exists := o.voices[ch.Voice]; !exists {
+	if old, exists := o.voices[ch.Voice]; exists {
+		// Re-claim of a resident slot: a stale timer must never fire the old
+		// charter/brain. Cancel the pending think and bump the generation so
+		// an in-flight RealClock fire discards itself too.
+		if old.cancel != nil {
+			old.cancel()
+			old.cancel = nil
+		}
+		old.gen++
+	} else {
 		o.order = append(o.order, ch.Voice)
 	}
 	o.voices[ch.Voice] = &voiceEntry{charter: ch, brain: b}
@@ -145,7 +154,15 @@ func (o *Orchestrator) PrincipalSays(ctx context.Context, agentVoice, text strin
 
 // Inject records an envelope and routes it. The envelope's ID, TS and V are
 // assigned here; lifecycle bookkeeping may annotate it with an exchange id.
+//
+// External settle envelopes are dropped — no Append, no routing. A settle on
+// the record MUST mean the world changed (law 6), so settles exist only via
+// the internal accept→synthesis path: settleExchange calls the private
+// inject funnel directly, which carries no such filter.
 func (o *Orchestrator) Inject(ctx context.Context, env protocol.Envelope) {
+	if env.Kind == protocol.KindSettle {
+		return
+	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.inject(ctx, env)
@@ -357,9 +374,15 @@ func (o *Orchestrator) think(ctx context.Context, ve *voiceEntry, trigger protoc
 	if err != nil || !a.Speak {
 		return // errors and the zero value are silence
 	}
-	// MANDATE GATE (law 4): a propose or settle whose terms are missing or
-	// outside the charter dies here, silently — it never reaches the record.
-	if a.Kind == protocol.KindPropose || a.Kind == protocol.KindSettle {
+	// MANDATE GATE (law 4): a propose whose terms are missing or outside the
+	// charter dies here, silently — it never reaches the record. A settle is
+	// dropped unconditionally, mandate or not: settles are synthesized by
+	// the lifecycle exclusively; a spoken settle would let a voice lie about
+	// state (law 6).
+	if a.Kind == protocol.KindSettle {
+		return
+	}
+	if a.Kind == protocol.KindPropose {
 		if a.Terms == nil || !slices.Contains(ve.charter.Mandate.MayProposeTerms, a.Terms.Type) {
 			return
 		}
