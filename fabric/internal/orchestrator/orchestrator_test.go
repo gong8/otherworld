@@ -539,3 +539,82 @@ func TestOnDropPinsAllFiveReasons(t *testing.T) {
 		}
 	}
 }
+
+// Pending exposes a copy of an open exchange's pending propose terms — the
+// consent path builds its accept from them — and reports false for unknown,
+// termless, counter-superseded-then-closed, and settled exchanges.
+func TestPendingExposesOpenExchangeTerms(t *testing.T) {
+	o, clock, log := harness(t)
+	ctx := context.Background()
+
+	heating := charter("voice:heating", "the household", protocol.VoiceThing, []string{"temperature.set"}, true)
+	o.AddVoice(ctx, heating, brain.NewFake(nil), map[string]any{"temperature": 21.0})
+
+	if _, ok := o.Pending("exc_unknown"); ok {
+		t.Fatal("unknown exchange must report no pending terms")
+	}
+
+	// A bare propose crystallizes an exchange; its id lands on the envelope.
+	o.Inject(ctx, protocol.Envelope{
+		From: "voice:her-agent", Serves: "her", Scope: o.ScopeID(),
+		To: []string{"voice:heating"}, Kind: protocol.KindPropose,
+		Terms: &protocol.Terms{Type: "temperature.set", Value: []byte(`23`)},
+	})
+	exc := (*log)[0].Exchange
+	if exc == "" {
+		t.Fatal("propose did not crystallize an exchange")
+	}
+
+	terms, ok := o.Pending(exc)
+	if !ok || terms == nil {
+		t.Fatalf("Pending(%s) = %v, %v; want terms, true", exc, terms, ok)
+	}
+	if terms.Type != "temperature.set" || string(terms.Value) != "23" {
+		t.Fatalf("Pending terms = %+v", terms)
+	}
+
+	// The returned terms are a copy: mutating them must not touch the record.
+	terms.Type = "tampered"
+	terms.Value[0] = 'X'
+	again, ok := o.Pending(exc)
+	if !ok || again.Type != "temperature.set" || string(again.Value) != "23" {
+		t.Fatalf("Pending returned shared state: %+v, %v", again, ok)
+	}
+
+	// An accept settles the exchange; a closed exchange has no pending terms.
+	o.Inject(ctx, protocol.Envelope{
+		From: "voice:heating", Serves: "the household", Scope: o.ScopeID(),
+		To: []string{"voice:her-agent"}, Kind: protocol.KindAccept,
+		Exchange: exc, Terms: again,
+	})
+	clock.Advance(10 * time.Second)
+	if got := kinds(*log); got != "propose>accept>settle" {
+		t.Fatalf("exchange did not settle: %s", got)
+	}
+	if _, ok := o.Pending(exc); ok {
+		t.Fatal("settled exchange must report no pending terms")
+	}
+
+	// A propose without terms still crystallizes (Inject does not gate
+	// mandates), but Pending must report false rather than nil terms.
+	o.Inject(ctx, protocol.Envelope{
+		From: "voice:her-agent", Serves: "her", Scope: o.ScopeID(),
+		To: []string{"voice:heating"}, Kind: protocol.KindPropose, Body: "vague",
+	})
+	bare := (*log)[len(*log)-1].Exchange
+	if _, ok := o.Pending(bare); ok {
+		t.Fatal("termless pending propose must report false")
+	}
+}
+
+// Credit routes marks through the orchestrator mutex into the shared World.
+func TestCreditAdjustsMarks(t *testing.T) {
+	clock := orchestrator.NewFakeClock(time.Date(2026, 6, 11, 3, 0, 0, 0, time.UTC))
+	w := world.New()
+	o := orchestrator.New(orchestrator.Config{Clock: clock, World: w})
+	o.Credit("voice:visitor-agent", 100)
+	o.Credit("voice:visitor-agent", -3)
+	if got := w.Marks("voice:visitor-agent"); got != 97 {
+		t.Fatalf("marks = %d, want 97", got)
+	}
+}

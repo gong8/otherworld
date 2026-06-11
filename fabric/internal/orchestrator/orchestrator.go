@@ -155,6 +155,32 @@ func (o *Orchestrator) WorldView(voice string) map[string]any {
 	return o.cfg.World.View(voice)
 }
 
+// Pending returns a copy of the terms on exchangeID's pending propose: nil,
+// false when the exchange is unknown, closed, or has no pending propose with
+// terms. The consent path (Task 11) needs these to construct the accept — the
+// lifecycle requires accepts to carry terms before they can settle.
+func (o *Orchestrator) Pending(exchangeID string) (*protocol.Terms, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	ex := o.exchanges[exchangeID]
+	if ex == nil || ex.closed || ex.pending == nil || ex.pending.Terms == nil {
+		return nil, false
+	}
+	cp := *ex.pending.Terms
+	cp.Value = slices.Clone(cp.Value)
+	return &cp, true
+}
+
+// Credit adjusts voice's marks balance under the orchestrator mutex. The
+// World lives in the orchestrator's lock domain (brains read Marks during
+// thinks), so runtime credits — claims granting a resident their stake — must
+// come through here, never via World.Credit directly.
+func (o *Orchestrator) Credit(voice string, n int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.cfg.World.Credit(voice, n)
+}
+
 // PrincipalSays is the private line: the principal behind agentVoice speaks
 // to their agent. "voice:her-agent" → principal "her" (strip the "voice:"
 // prefix and a trailing "-agent" suffix; without the suffix, the bare name).
