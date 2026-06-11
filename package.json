@@ -8,7 +8,7 @@
     "start": "next start",
     "gen:protocol": "node scripts/gen-protocol.mjs",
     "test:protocol": "node --test lib/protocol/agreement.test.mjs",
-    "test:web": "node --test lib/protocol/agreement.test.mjs lib/fabric.test.mjs"
+    "test:web": "node --test lib/protocol/agreement.test.mjs lib/fabric.test.mjs app/world/reducer.test.mjs"
   },
   "dependencies": {
     "next": "16.2.9",

@@ -1,0 +1,188 @@
+/* world.css — the séance: the landing's OVERHEARD section made live.
+   Everything is scoped under .world and set in the tokens and type scale of
+   globals.css — same paper, same hairlines, no new colors, no radii. */
+
+.world {
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+}
+
+.world-live {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+/* the reading column — same measure as the landing's exchanges */
+.world-col {
+  width: min(27rem, calc(100% - 3rem));
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* ---- the state line ---- */
+
+.world-state {
+  margin: clamp(1.8rem, 5vh, 3rem) auto 2.4rem;
+  padding: 0 24px;
+  text-align: center;
+}
+
+/* ---- the feed ---- */
+
+.world-feed {
+  flex: 1;
+  margin-top: 2.6rem;
+}
+
+.world .line {
+  margin: 0;
+  padding-left: 2.2em;
+  text-indent: -2.2em;
+  font-size: 1.1875rem;
+  line-height: 2.05;
+  font-style: italic;
+  color: var(--ink-speech);
+}
+
+.world .line + .line {
+  margin-top: 0.35rem;
+}
+
+/* new frames reveal opacity-only */
+.world .line,
+.world .settle {
+  animation: frame-in 0.6s ease both;
+}
+
+@keyframes frame-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* a settle is a ledger entry: ruled above and below */
+.world .settle {
+  margin: 1.7rem 0;
+  padding: 0.85rem 0;
+  border-top: 1px solid var(--hairline);
+  border-bottom: 1px solid var(--hairline);
+  text-align: center;
+}
+
+/* ---- consent prompts ---- */
+
+.world-prompts {
+  margin-top: 2.4rem;
+}
+
+.world .prompt {
+  border-left: 1px solid var(--hairline);
+  padding: 0.15rem 0 0.35rem 1.1rem;
+}
+
+.world .prompt + .prompt {
+  margin-top: 1.2rem;
+}
+
+.world .consent {
+  margin: 0.5rem 0 0;
+  padding-left: 2.2em;
+}
+
+/* the two consent words: print, not buttons */
+.world .consent button {
+  appearance: none;
+  border: none;
+  border-radius: 0;
+  background: none;
+  padding: 0 0 1px;
+  margin: 0;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: var(--ink);
+  cursor: pointer;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.world .consent button:hover,
+.world .consent button:focus-visible {
+  outline: none;
+  border-bottom-color: var(--ink);
+}
+
+/* ---- the foot ---- */
+
+.world-foot {
+  margin-top: 3rem;
+  padding-bottom: 1.6rem;
+}
+
+.world-quiet {
+  margin: 0 0 1.1rem;
+  text-align: center;
+}
+
+.world .speak-line {
+  display: block;
+  width: 100%;
+  border: none;
+  border-top: 1px solid var(--hairline);
+  border-radius: 0;
+  background: var(--paper);
+  font-family: inherit;
+  font-size: 1.0625rem;
+  font-style: italic;
+  line-height: 1.6;
+  color: var(--ink);
+  caret-color: var(--ink);
+  padding: 0.9rem 0 1.1rem;
+}
+
+.world .speak-line::placeholder {
+  color: var(--ink-mute);
+  opacity: 1;
+}
+
+.world .speak-line:focus {
+  outline: none;
+  border-top-color: var(--ink-mute);
+}
+
+/* full house: the input gives way to a plain notice */
+.world-full {
+  margin: 0;
+  padding: 0.9rem 0 1.1rem;
+  border-top: 1px solid var(--hairline);
+  text-align: center;
+}
+
+/* ---- links: print, not chrome ---- */
+
+.world a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.world a:hover {
+  color: var(--ink);
+}
+
+.world a:focus-visible {
+  outline: 1px solid var(--hairline);
+  outline-offset: 3px;
+}
+
+/* ---- reduced motion: a fully still page ---- */
+
+@media (prefers-reduced-motion: reduce) {
+  .world .line,
+  .world .settle {
+    animation: none;
+  }
+}
