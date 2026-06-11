@@ -172,6 +172,27 @@ describe("settle participants", () => {
     );
     assert.equal(s.stateStale, true);
   });
+
+  it("forgets an exchange on withdraw and decline too", () => {
+    const open = frame(1, {
+      kind: "propose",
+      from: "voice:her-agent",
+      exchange: "exch_w",
+      terms: { type: "temperature.set", value: 23 },
+    });
+
+    let s = run([
+      open,
+      frame(2, { kind: "withdraw", from: "voice:her-agent", exchange: "exch_w", body: "turn cap reached" }),
+    ]);
+    assert.equal(s.exchanges["exch_w"], undefined);
+
+    s = run([
+      { ...open, frame: { ...open.frame, env: { ...open.frame.env, exchange: "exch_d" } } },
+      frame(2, { kind: "decline", from: "voice:heating", exchange: "exch_d", body: "my principal declines." }),
+    ]);
+    assert.equal(s.exchanges["exch_d"], undefined);
+  });
 });
 
 // ─── claim transitions ──────────────────────────────────────────────────────
@@ -212,6 +233,21 @@ describe("claim transitions", () => {
   it("full notice is in register", () => {
     assert.equal(fullNotice(SCOPE), "the household is full. you are overhearing.");
     assert.equal(fullNotice("scope:street"), "the street is full. you are overhearing.");
+  });
+
+  it("lapsed reverts to state A: claim gone, prompts gone, foot says why", () => {
+    let s = worldReducer(initialWorld(SCOPE), { type: "claimed", claim: granted });
+    s = worldReducer(s, { type: "status", channel: "line", status: "open" });
+    s = worldReducer(s, {
+      type: "prompt",
+      env: { kind: "ask_principal", from: "voice:her-agent", exchange: "exch_p", body: "shall i?" },
+    });
+    s = worldReducer(s, { type: "lapsed" });
+    assert.equal(s.claim, null);
+    assert.deepEqual(s.prompts, []);
+    assert.equal(s.lineOpen, null);
+    assert.equal(s.claimError, "your voice has lapsed. claim again to speak.");
+    assert.equal(s.full, false); // back to state A, not state C
   });
 });
 
@@ -285,6 +321,25 @@ describe("feed status and state line", () => {
     assert.equal(s.feedOpen, false);
   });
 
+  it("routes status by channel: feed and line are independent", () => {
+    let s = initialWorld(SCOPE);
+    assert.equal(s.lineOpen, null);
+    s = worldReducer(s, { type: "status", channel: "feed", status: "open" });
+    s = worldReducer(s, { type: "status", channel: "line", status: "open" });
+    assert.equal(s.feedOpen, true);
+    assert.equal(s.lineOpen, true);
+    s = worldReducer(s, { type: "status", channel: "line", status: "closed" });
+    assert.equal(s.lineOpen, false);
+    assert.equal(s.feedOpen, true); // the feed banner is untouched
+  });
+
+  it("an unchanged status is a no-op (same reference)", () => {
+    let s = worldReducer(initialWorld(SCOPE), { type: "status", channel: "line", status: "open" });
+    assert.equal(worldReducer(s, { type: "status", channel: "line", status: "open" }), s);
+    s = worldReducer(s, { type: "status", channel: "feed", status: "open" });
+    assert.equal(worldReducer(s, { type: "status", channel: "feed", status: "open" }), s);
+  });
+
   it("stateLine sets the text and disarms the refresh", () => {
     let s = initialWorld(SCOPE);
     assert.equal(s.stateStale, true); // arms the mount fetch
@@ -310,6 +365,12 @@ describe("voiceName", () => {
     assert.equal(voiceName("voice:her-agent"), "her agent");
     assert.equal(voiceName("voice:heating"), "the heating");
     assert.equal(voiceName("voice:corner-shop"), "the corner shop");
+  });
+
+  it("degrades a nameless envelope to someone", () => {
+    assert.equal(voiceName(""), "someone");
+    assert.equal(voiceName(null), "someone");
+    assert.equal(voiceName(undefined), "someone");
   });
 
   it("scopeTitle names the room", () => {
@@ -344,6 +405,14 @@ describe("settleLine", () => {
       ["voice:corner-shop", "voice:her-agent"]
     );
     assert.equal(line, "· settled · trade · one biscuit · 3 marks · the corner shop × her agent ·");
+  });
+
+  it("omits a missing give instead of printing an empty segment", () => {
+    const line = settleLine(
+      { kind: "settle", terms: { type: "trade", value: { price_marks: 3 } } },
+      ["voice:corner-shop", "voice:her-agent"]
+    );
+    assert.equal(line, "· settled · trade · 3 marks · the corner shop × her agent ·");
   });
 
   it("degrades quietly when terms are missing", () => {

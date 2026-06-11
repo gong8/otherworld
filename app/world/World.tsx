@@ -48,40 +48,55 @@ export function World({ scope }: { scope: string }) {
     () =>
       openFeed(scope, 0, {
         onFrame: (f) => dispatch({ type: "frame", frame: f }),
-        onStatus: (s) => dispatch({ type: "status", status: s }),
+        onStatus: (s) =>
+          dispatch({ type: "status", channel: "feed", status: s }),
       }),
     [scope]
   );
 
-  // the private line, once claimed.
+  // the private line, once claimed. A dead token (three closes without ever
+  // opening) means the world no longer knows this voice: the claim lapses.
   const token = w.claim ? w.claim.token : null;
   useEffect(() => {
     if (!token) return;
-    const line = openLine(token, (env) => dispatch({ type: "prompt", env }));
+    const line = openLine(
+      token,
+      (env) => dispatch({ type: "prompt", env }),
+      (s) => {
+        if (s === "dead") {
+          try {
+            sessionStorage.removeItem("ow:" + scope);
+          } catch {
+            // nothing to forget is fine
+          }
+          dispatch({ type: "lapsed" });
+          return;
+        }
+        dispatch({ type: "status", channel: "line", status: s });
+      }
+    );
     lineRef.current = line;
     return () => {
       lineRef.current = null;
       line.close();
     };
-  }, [token]);
+  }, [token, scope]);
 
   // the state line: fetched on mount, refreshed after every settle frame.
   useEffect(() => {
     if (!w.stateStale) return;
-    let gone = false;
-    worldState(scope)
+    const ctrl = new AbortController();
+    worldState(scope, ctrl.signal)
       .then((j) => {
-        if (gone) return;
+        if (ctrl.signal.aborted) return;
         dispatch({ type: "stateLine", text: stateLineOf(scope, j) });
         dispatch({ type: "degraded", value: Boolean(j.degraded) });
       })
       .catch(() => {
         // keep the prior line; disarm so the next settle retries
-        if (!gone) dispatch({ type: "stateLine", text: null });
+        if (!ctrl.signal.aborted) dispatch({ type: "stateLine", text: null });
       });
-    return () => {
-      gone = true;
-    };
+    return () => ctrl.abort();
   }, [w.stateStale, scope]);
 
   // autoscroll only when already at the foot — never fight a reading user.
@@ -93,7 +108,7 @@ export function World({ scope }: { scope: string }) {
     };
     measure();
     window.addEventListener("scroll", measure, { passive: true });
-    window.addEventListener("resize", measure);
+    window.addEventListener("resize", measure, { passive: true });
     return () => {
       window.removeEventListener("scroll", measure);
       window.removeEventListener("resize", measure);
@@ -207,6 +222,9 @@ export function World({ scope }: { scope: string }) {
       <footer className="world-foot world-col">
         {w.feedOpen === false && (
           <p className="world-quiet micro">the line is quiet. reconnecting…</p>
+        )}
+        {w.claim != null && w.lineOpen === false && (
+          <p className="world-quiet micro">your line is quiet. reconnecting…</p>
         )}
         {w.full ? (
           <p className="micro world-full">{fullNotice(scope)}</p>

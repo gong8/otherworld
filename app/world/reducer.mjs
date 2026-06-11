@@ -52,6 +52,7 @@ export function fullNotice(scope) {
  */
 export function voiceName(from) {
   const s = String(from || "");
+  if (!s) return "someone"; // a nameless envelope still degrades legibly
   if (s.startsWith("voice:principal:")) {
     return s.slice("voice:principal:".length).replace(/-/g, " ");
   }
@@ -79,7 +80,7 @@ export function settleLine(env, parties) {
     if (label === "trade" && v && typeof v === "object") {
       const give = typeof v.give === "string" ? v.give : "";
       const marks = typeof v.price_marks === "number" ? v.price_marks : 0;
-      value = give + " · " + marks + " marks";
+      value = (give ? give + " · " : "") + marks + " marks";
     } else if (typeof v === "number") {
       value = label === "temperature" ? v.toFixed(1) + "°" : String(v);
     } else if (typeof v === "string") {
@@ -167,6 +168,8 @@ export function initialWorld(scope) {
     prompts: [],
     /** @type {boolean | null} null until the feed reports */
     feedOpen: null,
+    /** @type {boolean | null} null until the private line reports */
+    lineOpen: null,
     /** @type {Claim | null} */
     claim: null,
     /** @type {string | null} placeholder override after a refused claim */
@@ -211,10 +214,18 @@ export function worldReducer(s, a) {
       if (env.kind === "settle") {
         stateStale = true;
         rec.parties = partiesOf(exchanges[env.exchange], env);
-        if (env.exchange && exchanges[env.exchange]) {
-          exchanges = { ...exchanges };
-          delete exchanges[env.exchange];
-        }
+      }
+
+      // settle/withdraw/decline all close an exchange: the index forgets it
+      if (
+        (env.kind === "settle" ||
+          env.kind === "withdraw" ||
+          env.kind === "decline") &&
+        env.exchange &&
+        exchanges[env.exchange]
+      ) {
+        exchanges = { ...exchanges };
+        delete exchanges[env.exchange];
       }
 
       let frames = [...s.frames, rec];
@@ -224,11 +235,27 @@ export function worldReducer(s, a) {
       return { ...s, frames, lastSeq: f.seq, exchanges, stateStale };
     }
 
-    case "status":
-      return { ...s, feedOpen: a.status === "open" };
+    case "status": {
+      const open = a.status === "open";
+      if (a.channel === "line") {
+        return s.lineOpen === open ? s : { ...s, lineOpen: open };
+      }
+      return s.feedOpen === open ? s : { ...s, feedOpen: open };
+    }
 
     case "claimed":
       return { ...s, claim: a.claim, claimError: null, full: false };
+
+    // the private line refused the token outright: the claim has lapsed.
+    // Back to state A, with the foot saying why; prompts die with the line.
+    case "lapsed":
+      return {
+        ...s,
+        claim: null,
+        prompts: [],
+        lineOpen: null,
+        claimError: "your voice has lapsed. claim again to speak.",
+      };
 
     case "claimError": {
       const text = String(a.text || "")

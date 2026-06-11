@@ -124,19 +124,25 @@ export async function claim(
  * SEND: plain text spoken as the principal; no-ops unless the socket is OPEN
  * (including during a reconnect window).
  * onStatus (optional): "open"/"closed" per socket, e.g. for a "the line is
- * quiet" indicator.
+ * quiet" indicator — plus a terminal "dead": three consecutive closes without
+ * ever reaching OPEN mean the token itself is being refused (revoked, or the
+ * world restarted), not that the network blinked; retrying would knock
+ * forever on a door that no longer knows us. After "dead" there are no more
+ * reconnects; the caller should treat the claim as lapsed. A successful OPEN
+ * resets the fast-close counter.
  * close(): prevents all future reconnects, cancels any pending backoff timer,
  * and closes the live socket.
  */
 export function openLine(
   token: string,
   onPrompt: (env: Envelope) => void,
-  onStatus?: (s: "open" | "closed") => void
+  onStatus?: (s: "open" | "closed" | "dead") => void
 ): { send: (text: string) => void; close: () => void } {
   if (typeof window === "undefined") throw new Error("browser only");
 
   let closed = false;
   let delay = 0; // _backoff(0) → 1000 on first failure
+  let fastCloses = 0; // consecutive closes without ever reaching OPEN
   let ws: WebSocket | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -145,8 +151,11 @@ export function openLine(
 
     const url = `${wsBase}/v0/line?token=${encodeURIComponent(token)}`;
     ws = new WebSocket(url);
+    let sawOpen = false;
 
     ws.onopen = () => {
+      sawOpen = true;
+      fastCloses = 0; // a real open: the token is alive
       delay = 0; // reset backoff on successful open
       onStatus?.("open");
     };
@@ -163,11 +172,21 @@ export function openLine(
     };
 
     ws.onclose = () => {
-      onStatus?.("closed");
-      if (!closed) {
-        delay = _backoff(delay) as number;
-        timer = setTimeout(connect, delay);
+      if (closed) {
+        onStatus?.("closed");
+        return; // deliberate close(): never dead, never reconnect
       }
+      if (!sawOpen) {
+        fastCloses++;
+        if (fastCloses >= 3) {
+          closed = true;
+          onStatus?.("dead");
+          return;
+        }
+      }
+      onStatus?.("closed");
+      delay = _backoff(delay) as number;
+      timer = setTimeout(connect, delay);
     };
 
     ws.onerror = () => {
@@ -215,11 +234,16 @@ export async function consent(
 
 /**
  * state — GET /v0/state. Returns the scope's world-state object. Throws
- * Error(server text) on !ok; rejects with TypeError on network failure.
+ * Error(server text) on !ok; rejects with TypeError on network failure and
+ * with an AbortError when the optional signal fires.
  */
-export async function state(scope: string): Promise<Record<string, unknown>> {
+export async function state(
+  scope: string,
+  signal?: AbortSignal
+): Promise<Record<string, unknown>> {
   const r = await fetch(
-    `${base}/v0/state?scope=${encodeURIComponent(scope)}`
+    `${base}/v0/state?scope=${encodeURIComponent(scope)}`,
+    { signal }
   );
   if (!r.ok) throw new Error(await r.text());
   return r.json();
