@@ -46,11 +46,15 @@ Success criteria:
 ## monorepo
 
 ```
-proto/      protocol source of truth: JSON Schema + settlement term registry
-            codegen → fabric/internal/protocol (Go) + web/lib/protocol (TS)
+proto/      protocol source of truth: JSON Schema + settlement term registry.
+            Go types are hand-written in fabric/internal/protocol and proven
+            equivalent by schema-agreement tests; TS types are generated
+            (json-schema-to-typescript) when the web client lands.
 fabric/     Go. cmd/fabricd + internal/{protocol, store, runtime,
             orchestrator, brain, world, gateway}
-web/        Next.js (existing landing + new /world client)
+(root)      Next.js stays at repo root (existing landing + new /world client);
+            moving it under web/ would churn the live Vercel deploy for no
+            v1 benefit. fabric/, proto/, infra/ are .vercelignore'd.
 infra/      CDK (TS): vpc, fargate service + alb, rds postgres, alarms
 docs/       specs, MISSION.md stays at root
 ```
