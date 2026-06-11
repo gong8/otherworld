@@ -100,10 +100,13 @@ curl 'http://localhost:8080/v0/state?scope=scope:household'
 | 8 loyal by structure | charters are resident-editable; maker defaults visible (v1 gesture) |
 | 9 protocol not platform | `proto/` is the source of truth; `fabricd` is one self-hostable binary |
 
+## the web client
+
+`/world` is the séance — the live record, one page, one input; run it with `npm run dev` at the repo root and point `NEXT_PUBLIC_FABRIC_URL` at the fabric (defaults to `http://localhost:8080`). the fabric's CORS dev-wildcard pairs with the origins allowlist in `next.config.ts`; tighten both together when you deploy. the landing page is not wired to `/world` — linking "yours is listening." is the founder's call, deliberately deferred.
+
 ## what is not here yet
 
 - **bedrock brains** — `brain.Brain` is the seam; the `fake` adapter ships; the Bedrock (Claude) adapter arrives in Plan 3
-- **web client** — `/world` live feed and private line UI; Plan 2
 - **deploy** — Fargate + ALB + RDS via CDK; Plan 4; `make dev` covers local
 - **runtime package** — `fabric/internal/runtime` is built and tested but deliberately NOT wired: it hosts async voice loops for slow LLM brains; not needed while fake brains run under the orchestrator lock
 - **federation, real money, real devices** — v2 doors, all left open in the protocol
