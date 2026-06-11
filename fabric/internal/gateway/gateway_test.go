@@ -19,6 +19,9 @@ import (
 	"otherworld/fabric/internal/protocol"
 )
 
+// TestFeedStreamsAppendedEnvelopes is plan-pinned, adapted (sanctioned) to
+// the Frame wire shape: Broadcast takes the log seq and the feed carries
+// {"seq":...,"env":{...}}.
 func TestFeedStreamsAppendedEnvelopes(t *testing.T) {
 	g := gateway.New(gateway.Config{})
 	srv := httptest.NewServer(g.Handler())
@@ -33,18 +36,21 @@ func TestFeedStreamsAppendedEnvelopes(t *testing.T) {
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
-	g.Broadcast(protocol.Envelope{ID: "utt_X", Scope: "scope:test", Kind: protocol.KindSay, Body: "hello"})
+	g.Broadcast(7, protocol.Envelope{ID: "utt_X", Scope: "scope:test", Kind: protocol.KindSay, Body: "hello"})
 
 	_, data, err := conn.Read(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var env protocol.Envelope
-	if err := json.Unmarshal(data, &env); err != nil {
+	var frame gateway.Frame
+	if err := json.Unmarshal(data, &frame); err != nil {
 		t.Fatal(err)
 	}
-	if env.ID != "utt_X" {
-		t.Fatalf("got %q", env.ID)
+	if frame.Env.ID != "utt_X" {
+		t.Fatalf("got %q", frame.Env.ID)
+	}
+	if frame.Seq != 7 {
+		t.Fatalf("seq = %d, want 7", frame.Seq)
 	}
 }
 
@@ -106,17 +112,17 @@ func claim(t *testing.T, srv *httptest.Server, scope, name string) (voice, token
 	return out.Voice, out.Token
 }
 
-func readEnvelope(t *testing.T, ctx context.Context, conn *websocket.Conn) protocol.Envelope {
+func readFrame(t *testing.T, ctx context.Context, conn *websocket.Conn) gateway.Frame {
 	t.Helper()
 	_, data, err := conn.Read(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var env protocol.Envelope
-	if err := json.Unmarshal(data, &env); err != nil {
+	var frame gateway.Frame
+	if err := json.Unmarshal(data, &frame); err != nil {
 		t.Fatal(err)
 	}
-	return env
+	return frame
 }
 
 func waitViewers(t *testing.T, g *gateway.Gateway, scope string, want int) {
@@ -161,26 +167,26 @@ func TestFeedScopeIsolation(t *testing.T) {
 	connB := dialWS(t, ctx, srv, "/v0/feed?scope=scope:b")
 	defer connB.CloseNow()
 
-	g.Broadcast(protocol.Envelope{ID: "utt_a", Scope: "scope:a", Kind: protocol.KindSay})
-	g.Broadcast(protocol.Envelope{ID: "utt_b", Scope: "scope:b", Kind: protocol.KindSay})
+	g.Broadcast(1, protocol.Envelope{ID: "utt_a", Scope: "scope:a", Kind: protocol.KindSay})
+	g.Broadcast(2, protocol.Envelope{ID: "utt_b", Scope: "scope:b", Kind: protocol.KindSay})
 
-	if env := readEnvelope(t, ctx, connA); env.ID != "utt_a" {
-		t.Fatalf("scope:a feed got %q, want utt_a", env.ID)
+	if f := readFrame(t, ctx, connA); f.Env.ID != "utt_a" {
+		t.Fatalf("scope:a feed got %q, want utt_a", f.Env.ID)
 	}
-	if env := readEnvelope(t, ctx, connB); env.ID != "utt_b" {
-		t.Fatalf("scope:b feed got %q, want utt_b", env.ID)
+	if f := readFrame(t, ctx, connB); f.Env.ID != "utt_b" {
+		t.Fatalf("scope:b feed got %q, want utt_b", f.Env.ID)
 	}
 }
 
 func TestReplayThenLiveOrdering(t *testing.T) {
 	g := gateway.New(gateway.Config{
-		Replay: func(scope string, after int64) []protocol.Envelope {
+		Replay: func(scope string, after int64) []gateway.Frame {
 			if scope != "scope:test" || after != 0 {
 				t.Errorf("Replay(%q, %d), want (scope:test, 0)", scope, after)
 			}
-			return []protocol.Envelope{
-				{ID: "utt_1", Scope: scope, Kind: protocol.KindSay},
-				{ID: "utt_2", Scope: scope, Kind: protocol.KindSay},
+			return []gateway.Frame{
+				{Seq: 1, Env: protocol.Envelope{ID: "utt_1", Scope: scope, Kind: protocol.KindSay}},
+				{Seq: 2, Env: protocol.Envelope{ID: "utt_2", Scope: scope, Kind: protocol.KindSay}},
 			}
 		},
 	})
@@ -192,12 +198,18 @@ func TestReplayThenLiveOrdering(t *testing.T) {
 	conn := dialWS(t, ctx, srv, "/v0/feed?scope=scope:test&after=0")
 	defer conn.CloseNow()
 
-	g.Broadcast(protocol.Envelope{ID: "utt_3", Scope: "scope:test", Kind: protocol.KindSay})
+	g.Broadcast(3, protocol.Envelope{ID: "utt_3", Scope: "scope:test", Kind: protocol.KindSay})
 
+	prev := int64(0) // seqs must stay monotonic across the replay→live boundary
 	for i, want := range []string{"utt_1", "utt_2", "utt_3"} {
-		if env := readEnvelope(t, ctx, conn); env.ID != want {
-			t.Fatalf("message %d: got %q, want %q", i, env.ID, want)
+		f := readFrame(t, ctx, conn)
+		if f.Env.ID != want {
+			t.Fatalf("message %d: got %q, want %q", i, f.Env.ID, want)
 		}
+		if f.Seq <= prev {
+			t.Fatalf("message %d: seq %d not monotonic after %d", i, f.Seq, prev)
+		}
+		prev = f.Seq
 	}
 }
 
@@ -255,20 +267,20 @@ func TestAskPrincipalReachesOnlyItsLine(t *testing.T) {
 	rivalLine := dialWS(t, ctx, srv, "/v0/line?token="+rivalToken)
 	defer rivalLine.CloseNow()
 
-	g.Broadcast(protocol.Envelope{
+	g.Broadcast(1, protocol.Envelope{
 		ID: "utt_ask", Scope: "scope:test", Kind: protocol.KindAskPrincipal,
 		From: "voice:her-agent", To: []string{"voice:principal:her"}, Body: "may I accept?",
 	})
-	g.Broadcast(protocol.Envelope{
+	g.Broadcast(2, protocol.Envelope{
 		ID: "utt_marker", Scope: "scope:test", Kind: protocol.KindSay,
 		To: []string{"voice:principal:rival"},
 	})
 
-	if env := readEnvelope(t, ctx, herLine); env.ID != "utt_ask" {
-		t.Fatalf("her line got %q, want utt_ask", env.ID)
+	if f := readFrame(t, ctx, herLine); f.Env.ID != "utt_ask" {
+		t.Fatalf("her line got %q, want utt_ask", f.Env.ID)
 	}
-	if env := readEnvelope(t, ctx, rivalLine); env.ID != "utt_marker" {
-		t.Fatalf("rival line got %q, want utt_marker (utt_ask leaked?)", env.ID)
+	if f := readFrame(t, ctx, rivalLine); f.Env.ID != "utt_marker" {
+		t.Fatalf("rival line got %q, want utt_marker (utt_ask leaked?)", f.Env.ID)
 	}
 }
 
@@ -444,6 +456,74 @@ func TestNilCallbacksAreGuarded(t *testing.T) {
 	}
 }
 
+// TestRevokeKillsTokensAndDisconnectsLine: Revoke deletes every token for
+// the voice and drops the lines under its principal — the open line is
+// closed from the server side, and the old token 401s on /v0/line and
+// /v0/consent thereafter.
+func TestRevokeKillsTokensAndDisconnectsLine(t *testing.T) {
+	g := gateway.New(gateway.Config{
+		OnClaim: func(scope, name string) (string, error) { return "voice:her-agent", nil },
+	})
+	srv := httptest.NewServer(g.Handler())
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, token := claim(t, srv, "scope:test", "her")
+	conn := dialWS(t, ctx, srv, "/v0/line?token="+token)
+	defer conn.CloseNow()
+
+	g.Revoke("voice:her-agent")
+
+	if _, _, err := conn.Read(ctx); err == nil {
+		t.Fatal("revoked line still delivered a message")
+	}
+
+	url := strings.Replace(srv.URL, "http", "ws", 1) + "/v0/line?token=" + token
+	if c2, resp, err := websocket.Dial(ctx, url, nil); err == nil {
+		c2.CloseNow()
+		t.Fatal("line dial with revoked token succeeded")
+	} else if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("line dial: %v, want HTTP 401", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{"token": token, "exchange": "exc_1", "approve": true})
+	resp, err := http.Post(srv.URL+"/v0/consent", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("consent with revoked token: status %d, want 401", resp.StatusCode)
+	}
+}
+
+// TestOriginAllowlist: with Config.Origins set, only listed browser origins
+// may upgrade; without it (dev mode) any origin is accepted.
+func TestOriginAllowlist(t *testing.T) {
+	g := gateway.New(gateway.Config{Origins: []string{"allowed.example"}})
+	srv := httptest.NewServer(g.Handler())
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	url := strings.Replace(srv.URL, "http", "ws", 1) + "/v0/feed?scope=scope:test"
+
+	conn, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+		HTTPHeader: http.Header{"Origin": []string{"https://allowed.example"}},
+	})
+	if err != nil {
+		t.Fatalf("allowed origin rejected: %v", err)
+	}
+	conn.CloseNow()
+
+	if conn, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+		HTTPHeader: http.Header{"Origin": []string{"https://evil.example"}},
+	}); err == nil {
+		conn.CloseNow()
+		t.Fatal("disallowed origin accepted")
+	}
+}
+
 // TestSlowConsumerDoesNotBlockBroadcast: a feed conn that never reads must
 // not stall Broadcast — it is called from the orchestrator's Append path
 // with the orchestrator mutex held. The conn may be dropped; the world must
@@ -462,7 +542,7 @@ func TestSlowConsumerDoesNotBlockBroadcast(t *testing.T) {
 	body := strings.Repeat("x", 1024)
 	start := time.Now()
 	for i := 0; i < 1000; i++ {
-		g.Broadcast(protocol.Envelope{
+		g.Broadcast(int64(i+1), protocol.Envelope{
 			ID: fmt.Sprintf("utt_%d", i), Scope: "scope:test",
 			Kind: protocol.KindSay, Body: body,
 		})

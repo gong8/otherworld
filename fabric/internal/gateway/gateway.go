@@ -39,6 +39,14 @@ const (
 	writeTimeout = 10 * time.Second
 )
 
+// Frame is one feed/line message: the envelope plus its log sequence. The
+// seq is the client's reconnect cursor (?after=); envelopes themselves are
+// schema-frozen, so the cursor rides a wrapper frame.
+type Frame struct {
+	Seq int64             `json:"seq"`
+	Env protocol.Envelope `json:"env"`
+}
+
 // Config wires the gateway to its consumer. Every callback may be nil: nil
 // OnPrincipalSay drops line text, nil OnClaim refuses claims (501), nil
 // OnConsent makes consent a no-op, nil Replay skips catch-up, nil StateView
@@ -54,18 +62,26 @@ type Config struct {
 	// (never the principal pseudo-voice): the consumer injects the accept
 	// From this voice with the exchange id.
 	OnConsent func(exchange, voice string, approve bool)
-	// Replay returns scope's envelopes after the given cursor, for feed
+	// Replay returns scope's frames after the given cursor, for feed
 	// connections that ask to catch up before going live.
-	Replay func(scope string, after int64) []protocol.Envelope
+	Replay func(scope string, after int64) []Frame
 	// StateView renders scope's world state for /v0/state.
 	StateView func(scope string) any
+	// Origins, when non-empty, is the browser origin allowlist for websocket
+	// upgrades (websocket.AcceptOptions.OriginPatterns). Empty is dev mode:
+	// any origin is accepted — tolerable only because the gateway carries no
+	// cookies or ambient credentials (the feed is public; line and consent
+	// are gated by capability tokens the caller must present explicitly) —
+	// but production wiring (Task 11) should set it.
+	Origins []string
 }
 
 // Gateway fans the record out to watchers and carries the few inbound paths
 // (claims, consent, principal says) back to its consumer.
 type Gateway struct {
-	cfg Config
-	mux *http.ServeMux
+	cfg    Config
+	mux    *http.ServeMux
+	accept *websocket.AcceptOptions
 
 	mu     sync.Mutex
 	feeds  map[string]map[*conn]struct{} // scope → feed connections
@@ -75,11 +91,17 @@ type Gateway struct {
 
 func New(cfg Config) *Gateway {
 	g := &Gateway{
-		cfg:    cfg,
-		mux:    http.NewServeMux(),
+		cfg: cfg,
+		mux: http.NewServeMux(),
+		// InsecureSkipVerify here disables the browser same-origin check
+		// (NOT TLS verification) — dev mode, see Config.Origins.
+		accept: &websocket.AcceptOptions{InsecureSkipVerify: true},
 		feeds:  map[string]map[*conn]struct{}{},
 		lines:  map[string]map[*conn]struct{}{},
 		tokens: map[string]string{},
+	}
+	if len(cfg.Origins) > 0 {
+		g.accept = &websocket.AcceptOptions{OriginPatterns: cfg.Origins}
 	}
 	g.mux.HandleFunc("GET /v0/feed", g.handleFeed)
 	g.mux.HandleFunc("POST /v0/claim", g.handleClaim)
@@ -93,7 +115,8 @@ func New(cfg Config) *Gateway {
 // wrap) it.
 func (g *Gateway) Handler() http.Handler { return g.mux }
 
-// Broadcast fans env out to every feed connection watching env.Scope and to
+// Broadcast fans env — wrapped in a Frame carrying its log seq, the
+// reconnect cursor — out to every feed connection watching env.Scope and to
 // every private line whose principal pseudo-voice appears in env.To.
 //
 // Contract: Broadcast never blocks and performs no I/O. It is called from
@@ -102,10 +125,10 @@ func (g *Gateway) Handler() http.Handler { return g.mux }
 // connection's own writer goroutine — and returns; it never writes a socket
 // and never calls back into the orchestrator. A connection whose buffer is
 // full is dropped: a slow reader cannot stall the world.
-func (g *Gateway) Broadcast(env protocol.Envelope) {
-	data, err := json.Marshal(env)
+func (g *Gateway) Broadcast(seq int64, env protocol.Envelope) {
+	data, err := json.Marshal(Frame{Seq: seq, Env: env})
 	if err != nil {
-		return // an Envelope always marshals; nothing sane to do here anyway
+		return // a Frame always marshals; nothing sane to do here anyway
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -116,6 +139,24 @@ func (g *Gateway) Broadcast(env protocol.Envelope) {
 		for c := range g.lines[to] {
 			c.enqueue(data)
 		}
+	}
+}
+
+// Revoke withdraws voice's claim: every token mapping to voice is deleted (a
+// revoked token 401s on /v0/line and /v0/consent thereafter) and every
+// private line registered under voice's principal pseudo-voice is dropped —
+// its writer exits and disconnects the socket. Task 11 calls this on
+// leave/slot-free.
+func (g *Gateway) Revoke(voice string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for token, v := range g.tokens {
+		if v == voice {
+			delete(g.tokens, token)
+		}
+	}
+	for c := range g.lines[principalFor(voice)] {
+		c.drop() // the line handler unregisters on its way out
 	}
 }
 
@@ -198,13 +239,6 @@ func (g *Gateway) unregister(reg map[string]map[*conn]struct{}, key string, c *c
 	}
 }
 
-// acceptOptions skips the browser same-origin check. The gateway carries no
-// cookies or ambient credentials — the feed is public, and the line and
-// consent paths are gated by capability tokens the caller must present
-// explicitly — so a cross-origin page (the demo frontend serves from its own
-// origin) can do nothing a same-origin one couldn't.
-var acceptOptions = &websocket.AcceptOptions{InsecureSkipVerify: true}
-
 // handleFeed is GET /v0/feed?scope=...&after=... — the public record, live.
 func (g *Gateway) handleFeed(w http.ResponseWriter, r *http.Request) {
 	scope := r.URL.Query().Get("scope")
@@ -223,8 +257,8 @@ func (g *Gateway) handleFeed(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad after", http.StatusBadRequest)
 			return
 		}
-		for _, env := range g.cfg.Replay(scope, cursor) {
-			if data, err := json.Marshal(env); err == nil {
+		for _, frame := range g.cfg.Replay(scope, cursor) {
+			if data, err := json.Marshal(frame); err == nil {
 				backlog = append(backlog, data)
 			}
 		}
@@ -241,7 +275,7 @@ func (g *Gateway) handleFeed(w http.ResponseWriter, r *http.Request) {
 	g.register(g.feeds, scope, c)
 	defer g.unregister(g.feeds, scope, c)
 
-	ws, err := websocket.Accept(w, r, acceptOptions)
+	ws, err := websocket.Accept(w, r, g.accept)
 	if err != nil {
 		return
 	}
@@ -272,7 +306,7 @@ func (g *Gateway) handleLine(w http.ResponseWriter, r *http.Request) {
 	g.register(g.lines, principal, c)
 	defer g.unregister(g.lines, principal, c)
 
-	ws, err := websocket.Accept(w, r, acceptOptions)
+	ws, err := websocket.Accept(w, r, g.accept)
 	if err != nil {
 		return
 	}
@@ -313,6 +347,7 @@ func (g *Gateway) handleClaim(w http.ResponseWriter, r *http.Request) {
 		Scope string `json:"scope"`
 		Name  string `json:"name"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
@@ -341,6 +376,7 @@ func (g *Gateway) handleConsent(w http.ResponseWriter, r *http.Request) {
 		Exchange string `json:"exchange"`
 		Approve  bool   `json:"approve"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
