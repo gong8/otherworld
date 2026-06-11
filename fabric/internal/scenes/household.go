@@ -69,8 +69,12 @@ func Household() (scope string, seeds []Seed) {
 		},
 	}
 
-	// Rule: MEET-IN-THE-MIDDLE — must come BEFORE the plain accept rule so it
-	// wins when the delta is large. Match is pure: reads v.State["temperature"].
+	// Rule: MEET-IN-THE-MIDDLE. Match takes three clauses: (a) a
+	// temperature.set propose, (b) far from the current hold (> 1.5 degrees),
+	// (c) a prior temperature.set settle in Recent — evidence another resident
+	// already had their way. The disagreement clause keeps the line honest — a
+	// first big ask is an ask, not a dispute; heatingAccept's match is a
+	// strict superset, so this rule must precede it.
 	heatingCounter := brain.Rule{
 		Match: func(v brain.VoiceView) bool {
 			if v.Trigger.Kind != protocol.KindPropose {
@@ -84,7 +88,15 @@ func Household() (scope string, seeds []Seed) {
 				return false
 			}
 			current, _ := v.State["temperature"].(float64)
-			return math.Abs(proposed-current) > 1.5
+			if math.Abs(proposed-current) <= 1.5 {
+				return false
+			}
+			for _, e := range v.Recent {
+				if e.Kind == protocol.KindSettle && e.Terms != nil && e.Terms.Type == "temperature.set" {
+					return true
+				}
+			}
+			return false
 		},
 		Respond: func(v brain.VoiceView) brain.Action {
 			var proposed float64
@@ -104,7 +116,8 @@ func Household() (scope string, seeds []Seed) {
 		},
 	}
 
-	// Rule: plain accept — near proposals (delta ≤ 1.5).
+	// Rule: plain accept — near proposals, and far first asks with no settled
+	// temperature on the record yet.
 	heatingAccept := brain.Rule{
 		Match: func(v brain.VoiceView) bool {
 			if v.Trigger.Kind != protocol.KindPropose {
@@ -117,7 +130,7 @@ func Household() (scope string, seeds []Seed) {
 				Speak: true,
 				Kind:  protocol.KindAccept,
 				To:    []string{v.Trigger.From},
-				Body:  "very well. holding there.",
+				Body:  "holding there.",
 				Terms: v.Trigger.Terms,
 			}
 		},
@@ -253,6 +266,9 @@ func ResidentCharter(voice, serves string) protocol.Charter {
 
 // ResidentAgentRules returns the rule set attached by the composition root to
 // a claimed resident voice. Rules are ordered: first match wins.
+//
+// Rules 1–4 key on the principal's words. Substring match is intentional for
+// v1 demo legibility; word-boundary matching is left for real brains.
 func ResidentAgentRules() []brain.Rule {
 	// Rule 1: principal mentions cold → propose temperature up.
 	coldRule := brain.Rule{
@@ -268,7 +284,7 @@ func ResidentAgentRules() []brain.Rule {
 				Body:  "cold again. one degree up, please.",
 				Terms: &protocol.Terms{
 					Type:  "temperature.set",
-					Value: marshalTerms(22.0),
+					Value: marshalTerms(23.0),
 				},
 			}
 		},
@@ -291,7 +307,7 @@ func ResidentAgentRules() []brain.Rule {
 				Body:  "too warm now. one degree down, please.",
 				Terms: &protocol.Terms{
 					Type:  "temperature.set",
-					Value: marshalTerms(20.5),
+					Value: marshalTerms(19.0),
 				},
 			}
 		},
@@ -385,7 +401,27 @@ func ResidentAgentRules() []brain.Rule {
 		},
 	}
 
-	return []brain.Rule{coldRule, hotRule, darkRule, comfortRule, tradeRule}
+	// Rule 6: the heating counters with a middle → take it. This closes the
+	// compromise beat: counter-propose arrives, the resident agent accepts,
+	// and the orchestrator settles the exchange.
+	counterAcceptRule := brain.Rule{
+		Match: func(v brain.VoiceView) bool {
+			return v.Trigger.Kind == protocol.KindPropose &&
+				v.Trigger.From == "voice:heating" &&
+				v.Trigger.Terms != nil && v.Trigger.Terms.Type == "temperature.set"
+		},
+		Respond: func(v brain.VoiceView) brain.Action {
+			return brain.Action{
+				Speak: true,
+				Kind:  protocol.KindAccept,
+				To:    []string{"voice:heating"},
+				Body:  "fair enough.",
+				Terms: v.Trigger.Terms,
+			}
+		},
+	}
+
+	return []brain.Rule{coldRule, hotRule, darkRule, comfortRule, tradeRule, counterAcceptRule}
 }
 
 // Murmurs returns ambient lines for the given scope, for use by the Task 11

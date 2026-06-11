@@ -73,7 +73,7 @@ func TestAllChartersValidate(t *testing.T) {
 
 // ─── view builders ───────────────────────────────────────────────────────────
 
-func heatingView(triggerTermsValue float64) brain.VoiceView {
+func heatingView(from string, proposed, current float64, recent []protocol.Envelope) brain.VoiceView {
 	_, seeds := scenes.Household()
 	var heatingSeed scenes.Seed
 	for _, s := range seeds {
@@ -82,15 +82,27 @@ func heatingView(triggerTermsValue float64) brain.VoiceView {
 			break
 		}
 	}
-	b, _ := json.Marshal(triggerTermsValue)
+	b, _ := json.Marshal(proposed)
 	return brain.VoiceView{
-		Self:  heatingSeed.Charter,
-		State: map[string]any{"temperature": 21.0},
+		Self:   heatingSeed.Charter,
+		State:  map[string]any{"temperature": current},
+		Recent: recent,
 		Trigger: protocol.Envelope{
-			From:  "voice:her-agent",
+			From:  from,
 			Kind:  protocol.KindPropose,
 			Terms: &protocol.Terms{Type: "temperature.set", Value: b},
 		},
+	}
+}
+
+// settleEnvelope simulates the orchestrator's synthesized settle for a
+// temperature exchange — the evidence heatingCounter's Match scans Recent for.
+func settleEnvelope(value float64) protocol.Envelope {
+	b, _ := json.Marshal(value)
+	return protocol.Envelope{
+		From:  "voice:heating",
+		Kind:  protocol.KindSettle,
+		Terms: &protocol.Terms{Type: "temperature.set", Value: b},
 	}
 }
 
@@ -123,7 +135,7 @@ func runRules(rules []brain.Rule, v brain.VoiceView) (brain.Action, bool) {
 
 func TestHeatingAcceptsNearPropose(t *testing.T) {
 	// 21.5 vs 21.0 → delta 0.5 ≤ 1.5 → accept
-	v := heatingView(21.5)
+	v := heatingView("voice:her-agent", 21.5, 21.0, nil)
 	rules := rulesFor("voice:heating")
 	a, matched := runRules(rules, v)
 	if !matched {
@@ -135,6 +147,9 @@ func TestHeatingAcceptsNearPropose(t *testing.T) {
 	if a.Kind != protocol.KindAccept {
 		t.Fatalf("expected accept, got %q", a.Kind)
 	}
+	if a.Body != "holding there." {
+		t.Fatalf("unexpected body: %q", a.Body)
+	}
 	if a.Terms == nil || a.Terms.Type != "temperature.set" {
 		t.Fatalf("expected temperature.set terms, got %+v", a.Terms)
 	}
@@ -143,9 +158,42 @@ func TestHeatingAcceptsNearPropose(t *testing.T) {
 	}
 }
 
-func TestHeatingCountersFarPropose(t *testing.T) {
-	// 25.0 vs 21.0 → delta 4.0 > 1.5 → counter-propose at midpoint 23.0
-	v := heatingView(25.0)
+func TestHeatingAcceptsFarFirstAsk(t *testing.T) {
+	// 23.0 vs 21.0 → delta 2.0 > 1.5, but Recent holds no settled temperature:
+	// a first big ask is an ask, not a dispute — the honesty clause keeps the
+	// compromise line for actual disagreements. Plain accept.
+	v := heatingView("voice:her-agent", 23.0, 21.0, nil)
+	rules := rulesFor("voice:heating")
+	a, matched := runRules(rules, v)
+	if !matched {
+		t.Fatal("expected a rule to match")
+	}
+	if !a.Speak {
+		t.Fatal("Speak must be true")
+	}
+	if a.Kind != protocol.KindAccept {
+		t.Fatalf("expected accept (no prior settle → no dispute), got %q", a.Kind)
+	}
+	if a.Body != "holding there." {
+		t.Fatalf("unexpected body: %q", a.Body)
+	}
+	if a.Terms == nil || a.Terms.Type != "temperature.set" {
+		t.Fatalf("expected temperature.set terms, got %+v", a.Terms)
+	}
+	var val float64
+	if err := json.Unmarshal(a.Terms.Value, &val); err != nil || val != 23.0 {
+		t.Fatalf("accept should echo 23.0, got %s (err %v)", a.Terms.Value, err)
+	}
+	if len(a.To) == 0 || a.To[0] != "voice:her-agent" {
+		t.Fatalf("expected To=[voice:her-agent], got %v", a.To)
+	}
+}
+
+func TestHeatingCountersFarProposeAfterSettle(t *testing.T) {
+	// 19.0 vs 23.0 with a prior temperature settle in Recent → delta 4.0 > 1.5
+	// and the disagreement is real → counter-propose at midpoint 21.0.
+	recent := []protocol.Envelope{settleEnvelope(23.0)}
+	v := heatingView("voice:him-agent", 19.0, 23.0, recent)
 	rules := rulesFor("voice:heating")
 	a, matched := runRules(rules, v)
 	if !matched {
@@ -167,11 +215,11 @@ func TestHeatingCountersFarPropose(t *testing.T) {
 	if err := json.Unmarshal(a.Terms.Value, &mid); err != nil {
 		t.Fatalf("cannot unmarshal mid temperature: %v", err)
 	}
-	if mid != 23.0 {
-		t.Fatalf("expected midpoint 23.0, got %v", mid)
+	if mid != 21.0 {
+		t.Fatalf("expected midpoint 21.0, got %v", mid)
 	}
-	if len(a.To) == 0 || a.To[0] != "voice:her-agent" {
-		t.Fatalf("expected To=[voice:her-agent], got %v", a.To)
+	if len(a.To) == 0 || a.To[0] != "voice:him-agent" {
+		t.Fatalf("expected To=[voice:him-agent], got %v", a.To)
 	}
 	// mandate check: temperature.set is in heating's may_propose_terms
 	_, seeds := scenes.Household()
@@ -215,8 +263,8 @@ func TestResidentColdProposesHeat(t *testing.T) {
 	if err := json.Unmarshal(a.Terms.Value, &val); err != nil {
 		t.Fatalf("cannot unmarshal temperature value: %v", err)
 	}
-	if val != 22.0 {
-		t.Fatalf("expected 22.0, got %v", val)
+	if val != 23.0 {
+		t.Fatalf("expected 23.0, got %v", val)
 	}
 	// mandate check
 	if !contains(residentCharter.Mandate.MayProposeTerms, a.Terms.Type) {
@@ -260,8 +308,8 @@ func TestResidentHotProposesCooler(t *testing.T) {
 		if err := json.Unmarshal(a.Terms.Value, &val); err != nil {
 			t.Fatalf("cannot unmarshal temperature value for %q: %v", body, err)
 		}
-		if val != 20.5 {
-			t.Fatalf("expected 20.5 for %q, got %v", body, val)
+		if val != 19.0 {
+			t.Fatalf("expected 19.0 for %q, got %v", body, val)
 		}
 		// mandate check
 		if !contains(residentCharter.Mandate.MayProposeTerms, a.Terms.Type) {
@@ -463,6 +511,150 @@ func TestDoorSaysOnHail(t *testing.T) {
 	}
 	if len(a.To) == 0 || a.To[0] != "voice:her-agent" {
 		t.Fatalf("expected To=[voice:her-agent], got %v", a.To)
+	}
+}
+
+func TestResidentAcceptsHeatingCounter(t *testing.T) {
+	rules := scenes.ResidentAgentRules()
+	residentCharter := scenes.ResidentCharter("voice:her-agent", "her")
+	mid, _ := json.Marshal(21.0)
+	v := brain.VoiceView{
+		Self: residentCharter,
+		Trigger: protocol.Envelope{
+			From:  "voice:heating",
+			Kind:  protocol.KindPropose,
+			Terms: &protocol.Terms{Type: "temperature.set", Value: mid},
+		},
+	}
+	a, matched := runRules(rules, v)
+	if !matched {
+		t.Fatal("counter-accept rule should match a heating counter")
+	}
+	if !a.Speak {
+		t.Fatal("Speak must be true")
+	}
+	if a.Kind != protocol.KindAccept {
+		t.Fatalf("expected accept, got %q", a.Kind)
+	}
+	if len(a.To) == 0 || a.To[0] != "voice:heating" {
+		t.Fatalf("expected To=[voice:heating], got %v", a.To)
+	}
+	if a.Body != "fair enough." {
+		t.Fatalf("unexpected body: %q", a.Body)
+	}
+	if a.Terms == nil || a.Terms.Type != "temperature.set" {
+		t.Fatalf("expected echoed temperature.set terms, got %+v", a.Terms)
+	}
+	var val float64
+	if err := json.Unmarshal(a.Terms.Value, &val); err != nil || val != 21.0 {
+		t.Fatalf("accept should echo 21.0, got %s (err %v)", a.Terms.Value, err)
+	}
+}
+
+// TestDemoBeatOnPaper walks the two-beat demo script at the rule level,
+// asserting each Respond in order. The orchestrator's lifecycle (exchange
+// crystallization, settle synthesis, world apply) is simulated by hand
+// between beats — what is proven here is that the rules compose into the
+// scripted story: the compromise line fires on the second beat, says
+// something true, and the exchange has an accept to complete on.
+func TestDemoBeatOnPaper(t *testing.T) {
+	residentRules := scenes.ResidentAgentRules()
+	heatingRules := rulesFor("voice:heating")
+	her := scenes.ResidentCharter("voice:her-agent", "her")
+	him := scenes.ResidentCharter("voice:him-agent", "him")
+
+	// beat 1 — resident 1: "i'm cold" → her agent proposes 23.0 to the heating.
+	a1, ok := runRules(residentRules, brain.VoiceView{
+		Self: her,
+		Trigger: protocol.Envelope{
+			From: "voice:principal:her", Kind: protocol.KindSay, Body: "i'm cold",
+		},
+	})
+	if !ok || !a1.Speak || a1.Kind != protocol.KindPropose {
+		t.Fatalf("beat 1: expected a propose, got %+v", a1)
+	}
+	if len(a1.To) == 0 || a1.To[0] != "voice:heating" {
+		t.Fatalf("beat 1: expected To=[voice:heating], got %v", a1.To)
+	}
+	var v1 float64
+	if err := json.Unmarshal(a1.Terms.Value, &v1); err != nil || v1 != 23.0 {
+		t.Fatalf("beat 1: expected 23.0, got %s (err %v)", a1.Terms.Value, err)
+	}
+
+	// beat 1, reply — the heating holds 21.0 and nothing is settled yet: a
+	// first big ask is an ask, not a dispute → plain accept at 23.0.
+	a2, ok := runRules(heatingRules, heatingView("voice:her-agent", 23.0, 21.0, nil))
+	if !ok || !a2.Speak || a2.Kind != protocol.KindAccept {
+		t.Fatalf("beat 1 reply: expected an accept, got %+v", a2)
+	}
+	if a2.Body != "holding there." {
+		t.Fatalf("beat 1 reply: unexpected body %q", a2.Body)
+	}
+	var v2 float64
+	if err := json.Unmarshal(a2.Terms.Value, &v2); err != nil || v2 != 23.0 {
+		t.Fatalf("beat 1 reply: accept should echo 23.0, got %s (err %v)", a2.Terms.Value, err)
+	}
+
+	// between beats — the orchestrator settles the exchange: the world's
+	// temperature becomes 23.0 and a settle envelope joins Recent.
+	settled := settleEnvelope(23.0)
+
+	// beat 2 — resident 2: "too hot in here" → his agent proposes 19.0.
+	a3, ok := runRules(residentRules, brain.VoiceView{
+		Self: him,
+		Trigger: protocol.Envelope{
+			From: "voice:principal:him", Kind: protocol.KindSay, Body: "too hot in here",
+		},
+	})
+	if !ok || !a3.Speak || a3.Kind != protocol.KindPropose {
+		t.Fatalf("beat 2: expected a propose, got %+v", a3)
+	}
+	if len(a3.To) == 0 || a3.To[0] != "voice:heating" {
+		t.Fatalf("beat 2: expected To=[voice:heating], got %v", a3.To)
+	}
+	var v3 float64
+	if err := json.Unmarshal(a3.Terms.Value, &v3); err != nil || v3 != 19.0 {
+		t.Fatalf("beat 2: expected 19.0, got %s (err %v)", a3.Terms.Value, err)
+	}
+
+	// beat 2, reply — 19.0 against a held 23.0 with the earlier settle on the
+	// record: two residents have now pulled in opposite directions, the line
+	// is true → counter at the middle, roundHalf((19+23)/2) = 21.0.
+	a4, ok := runRules(heatingRules, heatingView("voice:him-agent", 19.0, 23.0, []protocol.Envelope{settled}))
+	if !ok || !a4.Speak || a4.Kind != protocol.KindPropose {
+		t.Fatalf("beat 2 reply: expected a counter-propose, got %+v", a4)
+	}
+	if !strings.Contains(a4.Body, "the middle") {
+		t.Fatalf("beat 2 reply: body should mention 'the middle', got %q", a4.Body)
+	}
+	if len(a4.To) == 0 || a4.To[0] != "voice:him-agent" {
+		t.Fatalf("beat 2 reply: expected To=[voice:him-agent], got %v", a4.To)
+	}
+	var v4 float64
+	if err := json.Unmarshal(a4.Terms.Value, &v4); err != nil || v4 != 21.0 {
+		t.Fatalf("beat 2 reply: expected midpoint 21.0, got %s (err %v)", a4.Terms.Value, err)
+	}
+
+	// beat 2, close — the counter reaches his agent; rule 6 takes the middle.
+	// The orchestrator then settles the exchange at 21.0: complete.
+	a5, ok := runRules(residentRules, brain.VoiceView{
+		Self: him,
+		Trigger: protocol.Envelope{
+			From: "voice:heating", Kind: protocol.KindPropose, Terms: a4.Terms,
+		},
+	})
+	if !ok || !a5.Speak || a5.Kind != protocol.KindAccept {
+		t.Fatalf("beat 2 close: expected an accept, got %+v", a5)
+	}
+	if a5.Body != "fair enough." {
+		t.Fatalf("beat 2 close: unexpected body %q", a5.Body)
+	}
+	if len(a5.To) == 0 || a5.To[0] != "voice:heating" {
+		t.Fatalf("beat 2 close: expected To=[voice:heating], got %v", a5.To)
+	}
+	var v5 float64
+	if err := json.Unmarshal(a5.Terms.Value, &v5); err != nil || v5 != 21.0 {
+		t.Fatalf("beat 2 close: accept should echo 21.0, got %s (err %v)", a5.Terms.Value, err)
 	}
 }
 
