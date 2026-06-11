@@ -28,9 +28,11 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"otherworld/fabric/internal/brain"
+	"otherworld/fabric/internal/budget"
 	"otherworld/fabric/internal/gateway"
 	"otherworld/fabric/internal/orchestrator"
 	"otherworld/fabric/internal/protocol"
@@ -38,6 +40,41 @@ import (
 	"otherworld/fabric/internal/store"
 	"otherworld/fabric/internal/world"
 )
+
+// restLogger wraps the budget meter so every rest transition is logged
+// exactly once. Observation is event-driven, never polled: the adapter
+// consults Allow before every think and feeds Add after every model
+// response, so each flip is seen on the very call that causes it (waking is
+// seen on the first Allow past the hour). It satisfies the bedrock adapter's
+// small Meter interface; B5 passes it as bedrock.Config.Meter.
+type restLogger struct {
+	m       *budget.Meter
+	resting atomic.Bool
+}
+
+func (r *restLogger) Add(in, out int) {
+	r.m.Add(in, out)
+	r.observe()
+}
+
+func (r *restLogger) Allow() bool {
+	ok := r.m.Allow()
+	r.observe()
+	return ok
+}
+
+// observe logs when the rest state flips. CompareAndSwap keeps the log
+// exactly-once per transition under concurrent thinks.
+func (r *restLogger) observe() {
+	now := r.m.Resting()
+	if r.resting.CompareAndSwap(!now, now) {
+		if now {
+			slog.Warn("the world is resting: token budget reached")
+		} else {
+			slog.Info("the world wakes")
+		}
+	}
+}
 
 // appendQueueSize is each scope's persist-then-broadcast buffer. Append runs
 // under the orchestrator mutex, so an overflow drops (loudly) — never blocks.
@@ -67,6 +104,13 @@ type server struct {
 	store  *store.Store
 	gw     *gateway.Gateway
 	scopes map[string]*scopeState
+	// meter is the world's token budget, wrapped so rest transitions log
+	// exactly once. Constructed only for -brains bedrock; B5 hands it to the
+	// adapter as its Meter. nil with fake brains — they cost nothing.
+	meter *restLogger
+	// resting reports the world's rest state for stateView. nil (fake
+	// brains) reads as false: a free world never rests.
+	resting func() bool
 	// runID namespaces per-boot identifiers: the orchestrator numbers
 	// utterances from 1 each boot, but utterances.id is UNIQUE across boots —
 	// the transcript accumulates; only the world is fresh.
@@ -136,6 +180,11 @@ func newServer(ctx context.Context, cfg config) (*server, error) {
 		exchanges:  map[string]exchangeInfo{},
 		marks:      map[string]map[string]int{},
 		storeFails: map[string]int{},
+	}
+	if cfg.brains == "bedrock" {
+		m := budget.New(cfg.budgetTokensPerHour)
+		s.meter = &restLogger{m: m}
+		s.resting = m.Resting
 	}
 	s.gw = gateway.New(gateway.Config{
 		OnPrincipalSay: s.onPrincipalSay,
@@ -486,6 +535,11 @@ func (s *server) stateView(scope string) any {
 	s.mu.Unlock()
 	if fails > 3 {
 		out["degraded"] = true
+	}
+	// resting mirrors degraded: present only when true. nil hook (fake
+	// brains) reads as false — a free world never rests.
+	if s.resting != nil && s.resting() {
+		out["resting"] = true
 	}
 	return out
 }

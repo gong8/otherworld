@@ -591,4 +591,28 @@ describe("stateLineOf", () => {
       "the street · corner shop holds 0 marks"
     );
   });
+
+  it("appends · resting when the world's budget is spent", () => {
+    assert.equal(
+      stateLineOf(SCOPE, {
+        scope: SCOPE,
+        things: { heating: { temperature: 21 } },
+        resting: true,
+      }),
+      "the household · 21.0° · resting"
+    );
+    assert.equal(
+      stateLineOf("scope:street", {
+        scope: "scope:street",
+        marks: { "voice:corner-shop": 97 },
+        resting: true,
+      }),
+      "the street · corner shop holds 97 marks · resting"
+    );
+    // absent and false read the same: an awake world shows nothing extra
+    assert.equal(
+      stateLineOf(SCOPE, { scope: SCOPE, things: {}, resting: false }),
+      "the household"
+    );
+  });
 });

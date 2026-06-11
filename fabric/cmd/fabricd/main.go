@@ -27,6 +27,11 @@ type config struct {
 	origins                  []string
 	debounceMin, debounceMax time.Duration
 	ambientMin, ambientMax   time.Duration
+	// brains selects the brain adapter ("fake" or "bedrock"). The budget
+	// meter exists only for bedrock — fake brains cost nothing.
+	brains string
+	// budgetTokensPerHour caps hourly model-token spend; 0 = unlimited.
+	budgetTokensPerHour int
 	// fresh: when true, WipeRecord is called immediately after store.Open and
 	// before seeding or serving. Dev sandbox only; the durable record is a
 	// production property.
@@ -35,13 +40,26 @@ type config struct {
 
 func defaultConfig(databaseURL string) config {
 	return config{
-		databaseURL: databaseURL,
-		debounceMin: 1500 * time.Millisecond,
-		debounceMax: 3000 * time.Millisecond,
-		ambientMin:  60 * time.Second,
-		ambientMax:  180 * time.Second,
+		databaseURL:         databaseURL,
+		debounceMin:         1500 * time.Millisecond,
+		debounceMax:         3000 * time.Millisecond,
+		ambientMin:          60 * time.Second,
+		ambientMax:          180 * time.Second,
+		brains:              "fake",
+		budgetTokensPerHour: defaultBudgetTokensPerHour,
 	}
 }
+
+// defaultBudgetTokensPerHour is the -budget-tokens-per-hour default. The
+// demo mix is Sonnet-dominant (every terms-carrying trigger thinks on
+// claude-sonnet-4-6; Haiku covers only terms-free thing turns — see the
+// bedrock package doc), so price the budget at Sonnet rates: $3/MTok input,
+// $15/MTok output. 500k tokens/hour bounds the hour at ~$1.50 were it all
+// input and ~$7.50 were it all output; real traffic is transcript-windows-in,
+// two-sentences-out, so spend sits near the input end — call it ≲$2/hour,
+// ≲$50/day if left running. Past the cap the world rests, honestly, rather
+// than overspends.
+const defaultBudgetTokensPerHour = 500_000
 
 // applyEnv folds in the OW_* millisecond overrides (the e2e test shrinks the
 // debounce to 10–20ms; ops may slow the murmurs down).
@@ -67,6 +85,8 @@ func (c *config) applyEnv() {
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	brains := flag.String("brains", "fake", "brain adapter: fake|bedrock")
+	budgetTokens := flag.Int("budget-tokens-per-hour", defaultBudgetTokensPerHour,
+		"hourly model-token budget for bedrock brains; 0 = unlimited (past it the world rests)")
 	origins := flag.String("origins", "", "comma-separated browser origin allowlist for websocket upgrades (empty: dev mode, any origin)")
 	fresh := flag.Bool("fresh", false, "wipe the record on boot (dev sandbox only; never use in production)")
 	flag.Parse()
@@ -88,6 +108,8 @@ func main() {
 	}
 	cfg := defaultConfig(databaseURL)
 	cfg.fresh = *fresh
+	cfg.brains = *brains
+	cfg.budgetTokensPerHour = *budgetTokens
 	for _, o := range strings.Split(*origins, ",") {
 		if o = strings.TrimSpace(o); o != "" {
 			cfg.origins = append(cfg.origins, o)

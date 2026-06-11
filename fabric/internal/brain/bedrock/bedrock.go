@@ -6,6 +6,18 @@
 // the heuristics and I/O under the lock would stall the whole scope on every
 // trigger. GateModel is kept in Config for the day a networked gate moves off
 // the lock. Think runs off the lock; seconds are safe there.
+//
+// # Cost shape
+//
+// The demo beat is SONNET-DOMINANT: every terms-carrying trigger (each leg of
+// a negotiation) routes to PersonModel, and person-voices always think on it —
+// ThinkModel (Haiku) covers only terms-free thing turns. Budget defaults
+// (fabricd's -budget-tokens-per-hour) assume this mix. The economy is layered:
+// the Relevant heuristics are free and kill most triggers at the source —
+// lifecycle-final triggers (settle/accept/withdraw) are never relevant, since
+// the lifecycle already did the work and reacting to it is babble that costs
+// Sonnet calls — and the Meter is the tripwire behind them, silencing Think
+// before a runaway loop can overspend.
 package bedrock
 
 import (
@@ -55,7 +67,19 @@ type Config struct {
 	HTTPClient *http.Client
 	// OnUsage, when set, observes per-think token usage (cache reads
 	// included). Called from Think, off the orchestrator lock; nil is ok.
+	// It stays a pure observer (logging) even when Meter is set.
 	OnUsage func(model string, inputTokens, outputTokens, cacheReadTokens int)
+	// Meter, when set, budgets Think: Allow is consulted FIRST — a resting
+	// meter is silence with no API call at all — and every response's usage
+	// feeds Add(in, out). Cache reads are not counted: they bill at 0.1×,
+	// and the meter is a tripwire, not an invoice. The small local interface
+	// keeps the adapter free of an internal/budget import; *budget.Meter
+	// satisfies it. nil = unlimited. Relevant is never metered — it is
+	// heuristic and free.
+	Meter interface {
+		Add(in, out int)
+		Allow() bool
+	}
 }
 
 type Bedrock struct {
@@ -97,6 +121,11 @@ func New(cfg Config) (*Bedrock, error) {
 // heuristics, never I/O (see the package doc for why the Haiku fallback was
 // skipped in v1).
 //
+//  0. a lifecycle-final trigger (settle, accept, withdraw) → NOT relevant,
+//     even when addressed [B3 review issues 4+5]: the lifecycle already did
+//     the work — the settle synthesized, the exchange closed — and a reply
+//     is post-settle ping-pong that costs Sonnet calls; this kills it at the
+//     source. decline stays relevant: counter-offers must flow.
 //  1. addressed (trigger.To contains my voice) → relevant
 //  2. my principal speaks (trigger.From is my principal pseudo-voice,
 //     derived by the same rule as everywhere: "voice:her-agent" →
@@ -105,6 +134,10 @@ func New(cfg Config) (*Bedrock, error) {
 //     comments); person-voices ignore hails unless addressed
 //  4. everything else → not relevant
 func (b *Bedrock) Relevant(_ context.Context, v brain.VoiceView) (bool, error) {
+	switch v.Trigger.Kind {
+	case protocol.KindSettle, protocol.KindAccept, protocol.KindWithdraw:
+		return false, nil
+	}
 	if slices.Contains(v.Trigger.To, v.Self.Voice) {
 		return true, nil
 	}
@@ -199,6 +232,13 @@ func (b *Bedrock) Think(ctx context.Context, v brain.VoiceView) (a brain.Action,
 		}
 	}()
 
+	// BUDGET GATE, before anything else: a resting world makes no API call.
+	// Silence with a nil error — the budget is policy, not failure, so it
+	// must not read as think.error in the drop log.
+	if b.cfg.Meter != nil && !b.cfg.Meter.Allow() {
+		return brain.Action{}, nil
+	}
+
 	model := b.cfg.ThinkModel
 	if v.Self.Kind == protocol.VoicePerson || v.Trigger.Terms != nil {
 		model = b.cfg.PersonModel
@@ -225,6 +265,9 @@ func (b *Bedrock) Think(ctx context.Context, v brain.VoiceView) (a brain.Action,
 		return brain.Action{}, fmt.Errorf("bedrock: think: %w", err)
 	}
 
+	if b.cfg.Meter != nil {
+		b.cfg.Meter.Add(int(msg.Usage.InputTokens), int(msg.Usage.OutputTokens))
+	}
 	if b.cfg.OnUsage != nil {
 		b.cfg.OnUsage(model,
 			int(msg.Usage.InputTokens),
@@ -254,6 +297,10 @@ func (b *Bedrock) Think(ctx context.Context, v brain.VoiceView) (a brain.Action,
 
 // toAction converts the wire shape into a brain.Action, re-marshaling the
 // terms value to RawMessage. Anything off-protocol degrades to silence.
+// TERMS HYGIENE [B3 review issue 1]: only propose and accept may carry terms
+// on the protocol; a model decorating a say/hail/decline/withdraw/
+// ask_principal with terms has its terms stripped — the action survives,
+// the decoration does not.
 func (w wireAction) toAction() brain.Action {
 	if !w.Speak {
 		return brain.Action{}
@@ -267,7 +314,7 @@ func (w wireAction) toAction() brain.Action {
 		return brain.Action{} // settle and the unknown both die here
 	}
 	a := brain.Action{Speak: true, Kind: kind, To: w.To, Body: w.Body}
-	if w.Terms != nil {
+	if w.Terms != nil && (kind == protocol.KindPropose || kind == protocol.KindAccept) {
 		raw, err := json.Marshal(w.Terms.Value)
 		if err != nil {
 			return brain.Action{}

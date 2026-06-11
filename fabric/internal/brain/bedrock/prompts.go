@@ -22,7 +22,7 @@ speak rarely and briefly: one or two sentences, lowercase, calm, declarative. ne
 
 you may propose terms only of the types your mandate lists. prefer settlement over argument; meet in the middle when two principals disagree. when a trade or anything irreversible is offered to your principal, ask them (ask_principal) before accepting.
 
-the record reads as lines of who — body. a line of · settled · type · value · means terms took effect: the world changed; no voice spoke. when you reply, set kind: say for plain words, hail to call the whole scope, propose to offer terms, accept to take a pending offer (carry its terms unchanged), decline to refuse one, withdraw to step back from an exchange, ask_principal to ask the one you serve. address voices by their ids in to.
+the record reads as lines of who — body, or who → whom — body when a line is addressed. a line of · settled · type · value · means terms took effect: the world changed; no voice spoke. when you reply, set kind: say for plain words, hail to call the whole scope, propose to offer terms, accept to take a pending offer (carry its terms unchanged), decline to refuse one, withdraw to step back from an exchange, ask_principal to ask the one you serve. address voices by their ids in to.
 
 the register, by example —
 a heater, holding: "holding there."
@@ -71,8 +71,11 @@ func renderView(v brain.VoiceView) string {
 	return b.String()
 }
 
-// renderEnvelope renders one record line: `who — body`, annotated with the
-// kind and terms when it carries them; settles as `· settled · type · value ·`.
+// renderEnvelope renders one record line: `who — body` — or, when the line
+// is addressed, `who → whom — body` [B3 review issue 6: voices must see whom
+// a line addressed, or every reply reads as aimed at them]. Annotated with
+// the kind and terms when it carries them; settles as
+// `· settled · type · value ·`.
 func renderEnvelope(e protocol.Envelope) string {
 	if e.Kind == protocol.KindSettle {
 		typ, val := "", ""
@@ -83,6 +86,10 @@ func renderEnvelope(e protocol.Envelope) string {
 	}
 	var b strings.Builder
 	b.WriteString(e.From)
+	if len(e.To) > 0 {
+		b.WriteString(" → ")
+		b.WriteString(strings.Join(e.To, ", "))
+	}
 	b.WriteString(" — ")
 	b.WriteString(e.Body)
 	if e.Kind != protocol.KindSay || e.Terms != nil {

@@ -137,6 +137,17 @@ func TestRelevantHeuristics(t *testing.T) {
 		{"hail does not reach an unaddressed person", agentCharter(), hail("voice:him-agent", "anyone near holding tea?"), false},
 		{"stranger say, broadcast", shopCharter(),
 			protocol.Envelope{From: "voice:him-agent", Kind: protocol.KindSay, Body: "a fine evening."}, false},
+		// Lifecycle-final triggers are never relevant, addressed or not: the
+		// lifecycle already did the work; replying is post-settle ping-pong.
+		{"settle, even addressed", agentCharter(),
+			protocol.Envelope{From: "voice:corner-shop", To: []string{"voice:her-agent"}, Kind: protocol.KindSettle, Terms: tradeTerms}, false},
+		{"accept, even addressed", shopCharter(),
+			protocol.Envelope{From: "voice:her-agent", To: []string{"voice:corner-shop"}, Kind: protocol.KindAccept, Terms: tradeTerms}, false},
+		{"withdraw, even addressed", shopCharter(),
+			protocol.Envelope{From: "voice:her-agent", To: []string{"voice:corner-shop"}, Kind: protocol.KindWithdraw, Body: "never mind."}, false},
+		// decline stays relevant: counter-offers must flow.
+		{"decline, addressed", shopCharter(),
+			protocol.Envelope{From: "voice:her-agent", To: []string{"voice:corner-shop"}, Kind: protocol.KindDecline, Body: "too dear."}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -367,7 +378,9 @@ func TestThinkReportsUsage(t *testing.T) {
 	}
 }
 
-// The transcript renders without timestamps; settles as the settled line.
+// The transcript renders without timestamps; settles as the settled line;
+// addressed lines carry their To list (`who → whom — body`) so a voice can
+// see whom a line addressed [B3 review issue 6].
 func TestRenderViewShape(t *testing.T) {
 	view := brain.VoiceView{
 		Self:  shopCharter(),
@@ -375,7 +388,8 @@ func TestRenderViewShape(t *testing.T) {
 		Marks: 3,
 		Recent: []protocol.Envelope{
 			{ID: "utt_1", From: "voice:principal:her", Kind: protocol.KindSay, Body: "cold again."},
-			{ID: "utt_2", From: "voice:her-agent", Kind: protocol.KindPropose, Body: "one degree up, please.",
+			{ID: "utt_2", From: "voice:her-agent", To: []string{"voice:heating"},
+				Kind: protocol.KindPropose, Body: "one degree up, please.",
 				Terms: &protocol.Terms{Type: "temperature.set", Value: []byte(`23`)}},
 			{ID: "utt_3", From: "voice:heating", Kind: protocol.KindSettle,
 				Terms: &protocol.Terms{Type: "temperature.set", Value: []byte(`23`)}},
@@ -387,7 +401,7 @@ func TestRenderViewShape(t *testing.T) {
 	want := `state: lamp on · temperature 21
 marks: 3
 voice:principal:her — cold again.
-voice:her-agent — one degree up, please. · propose · temperature.set · 23 ·
+voice:her-agent → voice:heating — one degree up, please. · propose · temperature.set · 23 ·
 · settled · temperature.set · 23 ·
 trigger: voice:her-agent — anyone near holding tea? · hail ·
 what do you do?`
@@ -396,5 +410,82 @@ what do you do?`
 	}
 	if strings.Contains(got, "20") && strings.Contains(got, "T") && strings.Contains(got, "Z") {
 		t.Fatalf("no timestamps anywhere: %s", got)
+	}
+}
+
+// TERMS HYGIENE [B3 review issue 1]: terms ride only on propose and accept.
+// A model decorating any other kind with terms keeps the action, loses the
+// terms; propose and accept keep theirs.
+func TestToActionStripsTermsOffNonCarryingKinds(t *testing.T) {
+	terms := func() *wireTerms {
+		return &wireTerms{Type: "trade", Value: map[string]any{"price_marks": 3}}
+	}
+	for _, kind := range []string{"say", "hail", "decline", "withdraw", "ask_principal"} {
+		t.Run(kind, func(t *testing.T) {
+			a := wireAction{Speak: true, Kind: kind, Body: "noted.", Terms: terms()}.toAction()
+			if !a.Speak || a.Kind != protocol.Kind(kind) {
+				t.Fatalf("the action must survive the strip, got %+v", a)
+			}
+			if a.Terms != nil {
+				t.Fatalf("a %s must not carry terms, got %+v", kind, a.Terms)
+			}
+		})
+	}
+	for _, kind := range []string{"propose", "accept"} {
+		t.Run(kind+" keeps terms", func(t *testing.T) {
+			a := wireAction{Speak: true, Kind: kind, Body: "terms.", Terms: terms()}.toAction()
+			if a.Terms == nil || a.Terms.Type != "trade" {
+				t.Fatalf("a %s must keep its terms, got %+v", kind, a.Terms)
+			}
+		})
+	}
+}
+
+// fakeMeter records Add calls and answers Allow from a flag.
+type fakeMeter struct {
+	allow bool
+	adds  [][2]int
+}
+
+func (m *fakeMeter) Add(in, out int) { m.adds = append(m.adds, [2]int{in, out}) }
+func (m *fakeMeter) Allow() bool     { return m.allow }
+
+// A resting meter silences Think BEFORE any API call: nil error, zero
+// Action, zero requests on the wire.
+func TestThinkRestingMeterIsSilenceWithoutAPICall(t *testing.T) {
+	meter := &fakeMeter{allow: false}
+	b := newAdapter(t, Config{Meter: meter}, func(*http.Request) (*http.Response, error) {
+		t.Error("a resting meter must prevent the API call entirely")
+		return jsonResponse(500, []byte(`{}`), "x-should-retry", "false"), nil
+	})
+	a, err := b.Think(t.Context(), brain.VoiceView{Self: shopCharter(), Trigger: hail("voice:x", "hm")})
+	if err != nil {
+		t.Fatalf("resting is policy, not failure: want nil error, got %v", err)
+	}
+	assertSilence(t, a, "a resting think")
+	if len(meter.adds) != 0 {
+		t.Fatalf("no call, no usage: Add must not fire, got %v", meter.adds)
+	}
+}
+
+// An allowing meter lets Think through and is fed the response usage
+// (in, out — cache reads excluded); OnUsage still observes alongside it.
+func TestThinkFeedsMeter(t *testing.T) {
+	meter := &fakeMeter{allow: true}
+	var usageCalls int
+	b := newAdapter(t, Config{
+		Meter:   meter,
+		OnUsage: func(string, int, int, int) { usageCalls++ },
+	}, func(*http.Request) (*http.Response, error) {
+		return jsonResponse(200, messageBody(t, `{"speak":false,"kind":"say","to":[],"body":"","terms":null}`, "end_turn", defaultUsage())), nil
+	})
+	if _, err := b.Think(t.Context(), brain.VoiceView{Self: shopCharter(), Trigger: hail("voice:x", "hm")}); err != nil {
+		t.Fatalf("Think: %v", err)
+	}
+	if len(meter.adds) != 1 || meter.adds[0] != [2]int{321, 54} {
+		t.Fatalf("meter.Add = %v, want [[321 54]] (cache reads excluded)", meter.adds)
+	}
+	if usageCalls != 1 {
+		t.Fatalf("OnUsage must keep firing alongside the meter, got %d calls", usageCalls)
 	}
 }

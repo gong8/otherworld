@@ -129,19 +129,27 @@ export function settleText(env) {
  *   household: "the household · 21.0° · lamp on · curtains open"
  *   street:    "the street · corner shop holds 97 marks"
  *
+ * When the state reports `resting: true` (the world's token budget is
+ * spent), the line ends with " · resting" — the same read-a-flag-off-state
+ * shape as `degraded`, but baked into the line because rest belongs to the
+ * world, not to this client's connection.
+ *
  * @param {string} scope
  * @param {Record<string, any>} j
  * @returns {string}
  */
 export function stateLineOf(scope, j) {
-  const things = (j && typeof j === "object" && j.things) || {};
+  const obj = j && typeof j === "object" ? j : {};
+  const things = obj.things || {};
+  const resting = obj.resting === true ? " · resting" : "";
   if (scope === "scope:street") {
-    const marks = (j && typeof j === "object" && j.marks) || {};
+    const marks = obj.marks || {};
     const held = marks["voice:corner-shop"];
     return (
       "the street · corner shop holds " +
       (typeof held === "number" ? held : 0) +
-      " marks"
+      " marks" +
+      resting
     );
   }
   const parts = [scopeTitle(scope)];
@@ -151,7 +159,7 @@ export function stateLineOf(scope, j) {
   if (typeof lamp === "string") parts.push("lamp " + lamp);
   const curtains = things.curtains && things.curtains.curtains;
   if (typeof curtains === "string") parts.push("curtains " + curtains);
-  return parts.join(" · ");
+  return parts.join(" · ") + resting;
 }
 
 /**
